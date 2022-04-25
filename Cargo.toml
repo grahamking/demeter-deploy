@@ -1,0 +1,7 @@
+[package]
+edition = "2021"
+name = "rcple"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1"
