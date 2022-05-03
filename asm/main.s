@@ -50,20 +50,28 @@ endstruc
 ;;
 ;; .data
 ;;
-section .data
-	align 16
+section .data align=16
 	MAX_FNAME_LEN: equ 100
+	MAX_PATH_LEN: equ 256
 	USAGE: db `Usage: rcple-h <dir>\n\0`
 	CR: db "",10,0
-	BUF_SIZE: equ 32768
+	SPACE: db " ",0
+	BUF_SIZE: equ 32768 ; read 32k of directory entries at a time
 	DT_DIR: equ 4 ; directory
 	DT_REG: equ 8 ; regular file
+	MAP_SHARED: equ 1 ; for mmap
+	PROT_READ: equ 1 ; mmap a file as read only
+	SLASH: equ "/" ; path separator
+	MISSING_SLASH: db `Path must end in a single /\n\0`
 
 ; error messages
 
 	EM_OPEN: db "open error: ",0
 	EM_FSTAT: db "fstat error: ",0
 	EM_GETDENTS64: db "getdents64 error: ",0
+	EM_MMAP: db "mmap error: ",0
+	EM_MUNMAP: db "munmap error: ",0
+	EM_FCHDIR: db "fchdir error: ",0
 
 ; fd's
 	STDIN: equ 0
@@ -81,6 +89,7 @@ section .data
 	SYS_IOCTL: equ 16
 	SYS_MSYNC: equ 26
 	SYS_EXIT: equ 60
+	SYS_FCHDIR: equ 81
 	SYS_GETDENTS64: equ 217
 
 ; err codes
@@ -126,8 +135,15 @@ section .data
 ;;
 ;; .bss: Global variables
 ;;
-section .bss
-	dir_fd: resb 1
+section .bss align=64
+	path_ptr: resb MAX_PATH_LEN  ; we store file path here, must be 64 byte aligned
+	dir_fd_ptr: resb 8
+	file_fd_ptr: resb 8
+	file_size_ptr: resb 8
+	mmap_ptr_ptr: resb 8		; address of mmap'ed file
+	dir_name_ptr: resb 8
+	dir_name_len_ptr: resb 8
+	bytes_to_process_ptr: resb 4
 
 ;;
 ;; .text
@@ -148,24 +164,46 @@ _start:
 	cmp al, 2
 	jne print_usage
 
-	; open the dir
 	mov rdi, [rsp + 16] ; address of first cmd line parameter, the directory path
+
+	; we'll need these later to make full paths
+	mov [dir_name_ptr], rdi
+	call strlen
+	mov [dir_name_len_ptr], rax
+
+	; check we have a slash at end of dir
+	dec eax ; examine last character
+	mov rsi, [dir_name_ptr]		; dir_name_ptr contains an address, so double indirect
+	cmp BYTE [rsi + rax], SLASH
+	jne missing_slash_err
+
+_got_slash:
+	; open the dir
+	mov rdi, [dir_name_ptr]
 	mov esi, 0x1000	; flags: O_RDONLY (0) | O_DIRECTORY (octal 0o200000)
 	mov eax, SYS_OPEN
-	safe_syscall
+	syscall
 	err_check EM_OPEN
-	; rax will be fd we just opened
 
-	mov [dir_fd], rax ; save open directory fd
+	; rax will be fd we just opened
+	mov [dir_fd_ptr], rax ; save open directory fd
+
+	; chdir so that our paths can be relative, hence shorter
+	mov rdi, rax
+	mov eax, SYS_FCHDIR
+	syscall
+	err_check EM_FCHDIR
+
 	sub rsp, BUF_SIZE
 
-	; get directory entries
-	;getdents64(3, 0x559cf124bbc0 /* 15 entries */, 32768) = 608
-	;
-	; read 32k of directory entries at a time
+	; zeroed registers for zeroing memory later
+	vpxord zmm0, zmm0, zmm0
+	vpxord zmm3, zmm3, zmm3
 
-next_file_chunk:
-	mov edi, [dir_fd]
+	; get directory entries
+
+next_files_chunk:
+	mov edi, [dir_fd_ptr]
 
 	mov rsi, rsp		; address of space for linux_dirent64 structures
 	mov edx, BUF_SIZE	; size of buffer (rsi) in bytes
@@ -175,7 +213,7 @@ next_file_chunk:
 
 	; eax will be the number of bytes read
 	; or 0 if no more directory entries
-	; this is how we exit the next_file_chunk loop
+	; this is how we exit the next_files_chunk loop
 	cmp eax, 0
 	je done_read
 
@@ -189,31 +227,58 @@ next_file_chunk:
 	;add rsp, 8
 
 	mov rbx, rsp ; start of first record
-	mov ecx, eax ; number of bytes in all records
+	mov DWORD [bytes_to_process_ptr], eax ; number of bytes in all records
 	xor eax, eax ; zero it, we use it later
 
-	; print all the filenames we read in this 32k chunk
-print_filenames:
+	; process all the filenames we read in this 32k chunk
+process_filenames:
 	cmp BYTE [rbx+dirent64.d_type], DT_REG
 	jne move_to_next_record ; TODO it's a dir, add to list to process
 
-	lea rdi, [rbx+dirent64.d_name] ; filename field of struct
-	call print
+	; zero path memory using AVX-512 instructions
+	vmovdqa64 [path_ptr], zmm0
+	vmovdqa64 [path_ptr+64], zmm3
+	vmovdqa64 [path_ptr+128], zmm0
+	vmovdqa64 [path_ptr+192], zmm3
 
-	; print carriage return
-	mov edi, CR
-	call print
+	; later this will have to include relative dir
+	cld
+	lea rdi, [rbx+dirent64.d_name] ; filename field of struct
+	mov rsi, rdi ; source for 'rep movsb', the filename. strlen changes rdi so do first.
+	call strlen
+	mov rcx, rax
+	mov rdi, path_ptr		; destination
+	rep movsb
+
+	; copy dir path
+	;cld
+	;mov rdi, path_ptr		; destination
+	;mov rsi, [dir_name_ptr] ; source
+	;mov rcx, [dir_name_len_ptr] ; length
+	;rep movsb
+
+	; copy filename after it
+	;push rdi
+	;lea rdi, [rbx+dirent64.d_name] ; filename field of struct
+	;mov rsi, rdi ; source for 'rep movsb', the filename. strlen changes rdi so do first.
+	;call strlen
+	;mov rcx, rax
+	;pop rdi      ; destination, continue after path. source was set earlier
+	;rep movsb
+
+	mov rdi, path_ptr   ; full path of file to crc
+	call crc_print
 
 	; move to next record
 move_to_next_record:
 	mov ax, WORD [rbx+dirent64.d_reclen]
 	add rbx, rax
 
-	sub ecx, eax
-	jnz print_filenames
-; end print_filenames
+	sub [bytes_to_process_ptr], eax
+	jnz process_filenames
+; end process_filenames
 
-	jmp next_file_chunk
+	jmp next_files_chunk
 
 done_read:
 	add rsp, BUF_SIZE
@@ -221,7 +286,114 @@ done_read:
 	; end
 	jmp exit
 
+;
+; rdi: pointer to null terminated filename
+; crc32's the file and outputs: "filename: crc32\n"
+crc_print:
 
+	push rax
+	push rdx
+	push rsi
+	push rdi
+	push r8
+	push r9
+	push r10
+
+	; print the filename
+	mov r10, rdi ; print does not preserve rdi
+	call print
+
+	; print a space
+	mov edi, SPACE
+	call print
+
+	; next calculate crc32, we print it at end of function
+
+	; open
+	mov rdi, r10 ; filename pointer saved earlier
+	mov esi, 0x80000 ; flags: O_RDONLY (0) | O_CLOEXEC (octal 0o2000000)
+	mov eax, SYS_OPEN
+	safe_syscall
+	err_check EM_OPEN
+	mov [file_fd_ptr], rax
+
+	; space to put stat buffer, on the stack
+	sub rsp, 144 ; struct stat in stat/stat.h
+
+	; fstat file to get size
+	mov eax, SYS_FSTAT
+	mov edi, [file_fd_ptr]
+	mov rsi, rsp	; &stat
+	safe_syscall
+	err_check EM_FSTAT
+
+	mov rax, [rsp + 48] ; stat st_size is 44 bytes into the struct
+						; but I guess 4 bytes of padding?
+	mov [file_size_ptr], rax
+	add rsp, 144		; pop stat buffer
+
+	; mmap it
+	mov rsi, rax			; size
+	mov eax, SYS_MMAP
+	mov edi, 0				; let kernel choose starting address
+	mov edx, PROT_READ
+	mov r10, MAP_SHARED		; flags
+	mov r8, [file_fd_ptr]
+	mov r9, 0				; offset in the file to start mapping
+	safe_syscall
+	err_check EM_MMAP
+
+	; mmap_ptr is **u8. It contains the address of a reserved (.bss) area
+	; that reserved area contains the address of the mmap section
+	mov [mmap_ptr_ptr], rax ; mmap address
+
+	; close file so we don't run out of descriptors in large folders
+	mov rdi, [file_fd_ptr]
+	mov eax, SYS_CLOSE
+	safe_syscall
+
+	; crc32, which has to happen 8 bytes at a time
+
+	mov eax, 0xFFFFFFFF
+	mov rcx, [file_size_ptr]
+	mov rsi, [mmap_ptr_ptr]
+_crc32_next_8:
+	crc32 rax, QWORD [rsi]
+	add rsi, 8
+	sub rcx, 8
+	jg _crc32_next_8 ; jump if rcx above 0
+
+	; convert crc32 to string
+	mov edi, eax
+	sub rsp, 16		; space to put the string
+	mov rsi, rsp
+	call itoa
+
+	; print code
+	mov rdi, rsi
+	call print
+	add rsp, 16
+
+	; print carriage return
+	mov edi, CR
+	call print
+
+	; munmap
+	mov eax, SYS_MUNMAP
+	mov rdi, [mmap_ptr_ptr]
+	mov esi, [file_size_ptr]
+	safe_syscall  ; not safe_syscall, no need so late in the program
+	err_check EM_MUNMAP
+
+	pop r10
+	pop r9
+	pop r8
+	pop rdi
+	pop rsi
+	pop rdx
+	pop rax
+
+	ret
 
 ;
 ;- for each dir
@@ -247,14 +419,6 @@ done_read:
 ;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility functions ;;
 ;;;;;;;;;;;;;;;;;;;;;;;
-
-;;
-;; print usage and exit
-;;
-print_usage:
-	mov rdi, USAGE
-	call print
-	call exit
 
 ;;
 ;; print a null terminated string to stdout
@@ -459,11 +623,30 @@ itoa:
 	ret
 
 ;;
+;; print usage and exit
+;;
+print_usage:
+	mov rdi, USAGE
+	call print
+	call exit
+
+;;
+;; print missing slash error and exit
+;;
+missing_slash_err:
+	mov rdi, MISSING_SLASH
+	call print
+
+	mov edi, 1  ; return code
+	mov eax, SYS_EXIT
+	syscall
+
+;;
 ;; exit
 ;; never returns
 ;;
 exit:
 	mov edi, 0  ; return code 0
 	mov eax, SYS_EXIT
-	safe_syscall
+	syscall
 

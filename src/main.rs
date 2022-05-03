@@ -31,7 +31,7 @@ fn main() {
             process::exit(1);
         },
     };
-    //println!("{:?}", local);
+    println!("{:?}", local);
 
     // now that we both local and remote compare and upload the differences
     // catching new files, and deleting removed files
