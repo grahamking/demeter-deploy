@@ -71,7 +71,7 @@ section .data align=16
 	EM_GETDENTS64: db "getdents64 error: ",0
 	EM_MMAP: db "mmap error: ",0
 	EM_MUNMAP: db "munmap error: ",0
-	EM_FCHDIR: db "fchdir error: ",0
+	EM_CHDIR: db "fhdir error: ",0
 
 ; fd's
 	STDIN: equ 0
@@ -89,7 +89,7 @@ section .data align=16
 	SYS_IOCTL: equ 16
 	SYS_MSYNC: equ 26
 	SYS_EXIT: equ 60
-	SYS_FCHDIR: equ 81
+	SYS_CHDIR: equ 80
 	SYS_GETDENTS64: equ 217
 
 ; err codes
@@ -177,9 +177,26 @@ _start:
 	cmp BYTE [rsi + rax], SLASH
 	jne missing_slash_err
 
-_got_slash:
-	; open the dir
+	; chdir so that our paths can be relative, hence shorter
+	mov rdi, rsi
+	mov eax, SYS_CHDIR
+	syscall
+	err_check EM_CHDIR
+
 	mov rdi, [dir_name_ptr]
+	call handle_dir
+
+	; end
+	jmp exit
+
+;;
+;; handle_dir: crc32 all the files in a directory
+;; calling itself on sub directories
+;; rdi: const char* path, of directory to crc
+;;
+handle_dir:
+	; open the dir
+	; rdi already has dir name ptr
 	mov esi, 0x1000	; flags: O_RDONLY (0) | O_DIRECTORY (octal 0o200000)
 	mov eax, SYS_OPEN
 	syscall
@@ -187,12 +204,6 @@ _got_slash:
 
 	; rax will be fd we just opened
 	mov [dir_fd_ptr], rax ; save open directory fd
-
-	; chdir so that our paths can be relative, hence shorter
-	mov rdi, rax
-	mov eax, SYS_FCHDIR
-	syscall
-	err_check EM_FCHDIR
 
 	sub rsp, BUF_SIZE
 
@@ -202,7 +213,7 @@ _got_slash:
 
 	; get directory entries
 
-next_files_chunk:
+.next_files_chunk:
 	mov edi, [dir_fd_ptr]
 
 	mov rsi, rsp		; address of space for linux_dirent64 structures
@@ -215,33 +226,64 @@ next_files_chunk:
 	; or 0 if no more directory entries
 	; this is how we exit the next_files_chunk loop
 	cmp eax, 0
-	je done_read
+	je .done_read
 
-	; this prints rax (debug)
-	;mov rdi, rax
-	;sub rsp, 8
-	;lea rsi, [rsp]
-	;call itoa
-	;mov rdi, rsi
-	;call print
-	;add rsp, 8
+	mov rdi, rsp ; start of first record
+	mov esi, eax ; number of bytes in all records
+	call process_single
 
-	mov rbx, rsp ; start of first record
-	mov DWORD [bytes_to_process_ptr], eax ; number of bytes in all records
-	xor eax, eax ; zero it, we use it later
+	jmp .next_files_chunk
 
-	; process all the filenames we read in this 32k chunk
-process_filenames:
+.done_read:
+	add rsp, BUF_SIZE
+	ret
+
+
+;;
+;; sub function of handle_dir
+;; rdi: address of first record (from getdents64)
+;; esi: number of bytes to process (all records)
+;;
+process_single:
+
+	mov rbx, rdi
+	mov DWORD [bytes_to_process_ptr], esi ; number of bytes in all records
+
+.process_filenames:
 	cmp BYTE [rbx+dirent64.d_type], DT_REG
-	jne move_to_next_record ; TODO it's a dir, add to list to process
+	je .crc_file
 
+	; it's a dir, recurse
+	xor edi, edi
+	mov di, WORD [rbx+dirent64.d_name] ; filename field of struct
+	call is_ignore_dir
+	cmp eax, 1
+	je .move_to_next_record
+
+.here:
+	push rbx
+	push QWORD [dir_fd_ptr]
+	push QWORD [bytes_to_process_ptr]
+	lea rdi, [rbx+dirent64.d_name] ; filename field of struct
+
+	call handle_dir
+
+	pop QWORD [bytes_to_process_ptr]
+	pop QWORD [dir_fd_ptr]
+	pop rbx
+
+	jmp .move_to_next_record
+
+	; it's a file
+.crc_file:
 	; zero path memory using AVX-512 instructions
 	vmovdqa64 [path_ptr], zmm0
 	vmovdqa64 [path_ptr+64], zmm3
 	vmovdqa64 [path_ptr+128], zmm0
 	vmovdqa64 [path_ptr+192], zmm3
 
-	; later this will have to include relative dir
+	; TODO this has to include relative dir
+
 	cld
 	lea rdi, [rbx+dirent64.d_name] ; filename field of struct
 	mov rsi, rdi ; source for 'rep movsb', the filename. strlen changes rdi so do first.
@@ -270,25 +312,19 @@ process_filenames:
 	call crc_print
 
 	; move to next record
-move_to_next_record:
+.move_to_next_record:
 	mov ax, WORD [rbx+dirent64.d_reclen]
 	add rbx, rax
 
 	sub [bytes_to_process_ptr], eax
-	jnz process_filenames
+	jnz .process_filenames
+	ret
 ; end process_filenames
 
-	jmp next_files_chunk
 
-done_read:
-	add rsp, BUF_SIZE
-
-	; end
-	jmp exit
-
-;
-; rdi: pointer to null terminated filename
-; crc32's the file and outputs: "filename: crc32\n"
+;;
+;; rdi: pointer to null terminated filename
+;; crc32's the file and outputs: "filename: crc32\n"
 crc_print:
 
 	push rax
@@ -357,11 +393,11 @@ crc_print:
 	mov eax, 0xFFFFFFFF
 	mov rcx, [file_size_ptr]
 	mov rsi, [mmap_ptr_ptr]
-_crc32_next_8:
+.crc32_next_8:
 	crc32 rax, QWORD [rsi]
 	add rsi, 8
 	sub rcx, 8
-	jg _crc32_next_8 ; jump if rcx above 0
+	jg .crc32_next_8 ; jump if rcx above 0
 
 	; convert crc32 to string
 	mov edi, eax
@@ -395,26 +431,25 @@ _crc32_next_8:
 
 	ret
 
-;
-;- for each dir
-;
-;openat(AT_FDCWD, "/home/graham/src/darkcoding/content", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = 3
-;newfstatat(3, "", {st_mode=S_IFDIR|0755, st_size=510, ...}, AT_EMPTY_PATH) = 0
-;// get directory entries
-;getdents64(3, 0x559cf124bbc0 /* 15 entries */, 32768) = 608
-;
-;- for each file
-;
-;// open
-;openat(AT_FDCWD, "/home/graham/src/darkcoding/content/book-recommendations.md", O_RDONLY|O_CLOEXEC) = 4
-;// read 8k buffers (but maybe mmap?)
-;read(4, "---\ntitle: Book recommendations\n"..., 8192) = 598
-;read(4, "", 8192)                       = 0
-;close(4)
-;
-;https://www.felixcloutier.com/x86/crc32
-;
-;- output full path and crc32
+;;
+;; is_ignore_dir: Should we ignore this directory ('.' and '..')
+;; IN rdi: address of dir name string
+;; OUT ax: 1 if yes ignore it, 0 otherwise
+;;
+is_ignore_dir:
+	cmp di, 0x002E ; '.\0'
+	je .yes
+	cmp di, 0x2E2E ; '..'
+	je .yes
+
+	; don't ignore it
+	mov eax, 0
+	ret
+
+.yes:
+	mov eax, 1
+	ret
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility functions ;;
