@@ -437,19 +437,21 @@ crc_print:
 ;; OUT ax: 1 if yes ignore it, 0 otherwise
 ;;
 is_ignore_dir:
-	cmp di, 0x002E ; '.\0'
-	je .yes
-	cmp di, 0x2E2E ; '..'
-	je .yes
+	push rbx
 
-	; don't ignore it
-	mov eax, 0
+	xor eax, eax
+	xor ebx, ebx
+
+	cmp di, 0x002E ; '.\0'	; is it '.' dir?
+	sete al					; set AL to 1 if they are equal, set to 0 otherwise
+
+	cmp di, 0x2E2E ; '..'	; is it '..' dir?
+	sete bl
+
+	or eax, ebx				; is it either of them?
+
+	pop rbx
 	ret
-
-.yes:
-	mov eax, 1
-	ret
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility functions ;;
