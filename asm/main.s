@@ -54,7 +54,7 @@ section .data align=16
 	MAX_FNAME_LEN: equ 100
 	MAX_PATH_LEN: equ 256
 	USAGE: db `Usage: rcple-h <dir>\n\0`
-	CR: db "",10,0
+	CR: db "",10,0  ; 0 is the terminating null byte
 	SPACE: db " ",0
 	BUF_SIZE: equ 32768 ; read 32k of directory entries at a time
 	DT_DIR: equ 4 ; directory
@@ -63,15 +63,18 @@ section .data align=16
 	PROT_READ: equ 1 ; mmap a file as read only
 	SLASH: equ "/" ; path separator
 	MISSING_SLASH: db `Path must end in a single /\n\0`
+	DOT_DIR: db ".",0
 
 ; error messages
 
-	EM_OPEN: db "open error: ",0
+	EM_OPEN_FILE: db "file open error for CRCing: ",0
+	EM_OPEN_DIR: db "dir open error for listing: ",0
 	EM_FSTAT: db "fstat error: ",0
 	EM_GETDENTS64: db "getdents64 error: ",0
 	EM_MMAP: db "mmap error: ",0
 	EM_MUNMAP: db "munmap error: ",0
 	EM_CHDIR: db "fhdir error: ",0
+	EM_CLOSE: db "close error: ",0
 
 ; fd's
 	STDIN: equ 0
@@ -137,12 +140,14 @@ section .data align=16
 ;;
 section .bss align=64
 	path_ptr: resb MAX_PATH_LEN  ; we store file path here, must be 64 byte aligned
+	active_dir_ptr: resb MAX_PATH_LEN ; the directory we are working on
 	dir_fd_ptr: resb 8
 	file_fd_ptr: resb 8
 	file_size_ptr: resb 8
 	mmap_ptr_ptr: resb 8		; address of mmap'ed file
 	dir_name_ptr: resb 8
 	dir_name_len_ptr: resb 8
+	active_dir_len_ptr: resb 8
 	bytes_to_process_ptr: resb 4
 
 ;;
@@ -183,7 +188,11 @@ _start:
 	syscall
 	err_check EM_CHDIR
 
-	mov rdi, [dir_name_ptr]
+	; start in current directory
+	xor eax, eax
+	mov ax, [DOT_DIR]
+	mov [active_dir_ptr], ax
+	inc QWORD [active_dir_len_ptr]
 	call handle_dir
 
 	; end
@@ -191,16 +200,17 @@ _start:
 
 ;;
 ;; handle_dir: crc32 all the files in a directory
-;; calling itself on sub directories
-;; rdi: const char* path, of directory to crc
+;; calling itself on sub directories.
+;; Expects [active_dir_ptr] to contain a 'const char* path' of the directory to crc,
+;;  relative to dir passed on cmd line.
 ;;
 handle_dir:
 	; open the dir
-	; rdi already has dir name ptr
+	mov rdi, active_dir_ptr ; rdi now has an address
 	mov esi, 0x1000	; flags: O_RDONLY (0) | O_DIRECTORY (octal 0o200000)
 	mov eax, SYS_OPEN
 	syscall
-	err_check EM_OPEN
+	err_check EM_OPEN_DIR
 
 	; rax will be fd we just opened
 	mov [dir_fd_ptr], rax ; save open directory fd
@@ -236,6 +246,12 @@ handle_dir:
 
 .done_read:
 	add rsp, BUF_SIZE
+
+	mov rdi, [dir_fd_ptr]
+	mov eax, SYS_CLOSE
+	safe_syscall
+	err_check EM_CLOSE
+
 	ret
 
 
@@ -253,24 +269,49 @@ process_single:
 	cmp BYTE [rbx+dirent64.d_type], DT_REG
 	je .crc_file
 
-	; it's a dir, recurse
+	; it's a dir, should we skip it? ('.' and '..')
 	xor edi, edi
 	mov di, WORD [rbx+dirent64.d_name] ; filename field of struct
 	call is_ignore_dir
 	cmp eax, 1
 	je .move_to_next_record
 
-.here:
+	; it's a dir we want to handle, recurse
 	push rbx
 	push QWORD [dir_fd_ptr]
 	push QWORD [bytes_to_process_ptr]
-	lea rdi, [rbx+dirent64.d_name] ; filename field of struct
+	push QWORD [active_dir_len_ptr]
+
+	; append this dir to current one
+
+	; add a slash separator
+	mov rcx, [active_dir_len_ptr]
+	mov rdi, active_dir_ptr
+	add rdi, rcx
+	mov BYTE [rdi], SLASH
+	inc rcx
+
+	; add this dir
+	lea rdi, [rbx+dirent64.d_name]	; filename field of struct
+	call strlen ; length of dir name, which is in rdi
+	lea rdi, [active_dir_ptr + rcx] ; destination
+	lea rsi, [rbx+dirent64.d_name]	; source
+	mov ecx, eax					; copy rcx many bytes (strlen result)
+	inc ecx							;  plus 1 to include the null terminator.
+	;inc QWORD [active_dir_len_ptr]
+	add QWORD [active_dir_len_ptr], rcx
+	rep movsb
 
 	call handle_dir
 
+	pop QWORD [active_dir_len_ptr]
 	pop QWORD [bytes_to_process_ptr]
 	pop QWORD [dir_fd_ptr]
 	pop rbx
+
+	; truncate active_dir_ptr contents to length before subdir call
+	mov rax, QWORD [active_dir_len_ptr]
+	mov BYTE [active_dir_ptr + rax], 0
 
 	jmp .move_to_next_record
 
@@ -282,31 +323,29 @@ process_single:
 	vmovdqa64 [path_ptr+128], zmm0
 	vmovdqa64 [path_ptr+192], zmm3
 
-	; TODO this has to include relative dir
+	; copy dir path
+
+	mov rdi, active_dir_ptr
+	call strlen
+	mov rcx, rax
 
 	cld
+	mov rdi, path_ptr			; destination
+	mov rsi, active_dir_ptr		; source
+	rep movsb
+
+	; path separator
+	mov BYTE [rdi], SLASH
+	inc rdi
+
+	; copy filename after it
+	push rdi
 	lea rdi, [rbx+dirent64.d_name] ; filename field of struct
 	mov rsi, rdi ; source for 'rep movsb', the filename. strlen changes rdi so do first.
 	call strlen
 	mov rcx, rax
-	mov rdi, path_ptr		; destination
+	pop rdi      ; destination, continue after path. source was set earlier
 	rep movsb
-
-	; copy dir path
-	;cld
-	;mov rdi, path_ptr		; destination
-	;mov rsi, [dir_name_ptr] ; source
-	;mov rcx, [dir_name_len_ptr] ; length
-	;rep movsb
-
-	; copy filename after it
-	;push rdi
-	;lea rdi, [rbx+dirent64.d_name] ; filename field of struct
-	;mov rsi, rdi ; source for 'rep movsb', the filename. strlen changes rdi so do first.
-	;call strlen
-	;mov rcx, rax
-	;pop rdi      ; destination, continue after path. source was set earlier
-	;rep movsb
 
 	mov rdi, path_ptr   ; full path of file to crc
 	call crc_print
@@ -350,7 +389,7 @@ crc_print:
 	mov esi, 0x80000 ; flags: O_RDONLY (0) | O_CLOEXEC (octal 0o2000000)
 	mov eax, SYS_OPEN
 	safe_syscall
-	err_check EM_OPEN
+	err_check EM_OPEN_FILE
 	mov [file_fd_ptr], rax
 
 	; space to put stat buffer, on the stack
@@ -368,6 +407,12 @@ crc_print:
 	mov [file_size_ptr], rax
 	add rsp, 144		; pop stat buffer
 
+	; if the file is empty the crc will be 0, so skip straight to output.
+	; once we get to that label the crc is expected to be in rax, so
+	; we can leave the 0 it already has.
+	cmp rax, 0
+	je .got_crc
+
 	; mmap it
 	mov rsi, rax			; size
 	mov eax, SYS_MMAP
@@ -383,11 +428,6 @@ crc_print:
 	; that reserved area contains the address of the mmap section
 	mov [mmap_ptr_ptr], rax ; mmap address
 
-	; close file so we don't run out of descriptors in large folders
-	mov rdi, [file_fd_ptr]
-	mov eax, SYS_CLOSE
-	safe_syscall
-
 	; crc32, which has to happen 8 bytes at a time
 
 	mov eax, 0xFFFFFFFF
@@ -399,8 +439,19 @@ crc_print:
 	sub rcx, 8
 	jg .crc32_next_8 ; jump if rcx above 0
 
+	; munmap
+	push rax
+	mov eax, SYS_MUNMAP
+	mov rdi, [mmap_ptr_ptr]
+	mov esi, [file_size_ptr]
+	safe_syscall
+	err_check EM_MUNMAP
+	pop rax
+
+.got_crc:
+
 	; convert crc32 to string
-	mov edi, eax
+	mov edi, eax	; crc32 value is in rax
 	sub rsp, 16		; space to put the string
 	mov rsi, rsp
 	call itoa
@@ -414,12 +465,11 @@ crc_print:
 	mov edi, CR
 	call print
 
-	; munmap
-	mov eax, SYS_MUNMAP
-	mov rdi, [mmap_ptr_ptr]
-	mov esi, [file_size_ptr]
-	safe_syscall  ; not safe_syscall, no need so late in the program
-	err_check EM_MUNMAP
+	; close file so we don't run out of descriptors in large folders
+	mov rdi, [file_fd_ptr]
+	mov eax, SYS_CLOSE
+	safe_syscall
+	err_check EM_CLOSE
 
 	pop r10
 	pop r9
