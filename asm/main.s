@@ -73,7 +73,7 @@ section .data align=16
 	EM_GETDENTS64: db "getdents64 error: ",0
 	EM_MMAP: db "mmap error: ",0
 	EM_MUNMAP: db "munmap error: ",0
-	EM_CHDIR: db "fhdir error: ",0
+	EM_CHDIR: db "chdir error: ",0
 	EM_CLOSE: db "close error: ",0
 
 ; fd's
@@ -210,7 +210,10 @@ handle_dir:
 	mov esi, 0x1000	; flags: O_RDONLY (0) | O_DIRECTORY (octal 0o200000)
 	mov eax, SYS_OPEN
 	syscall
-	err_check EM_OPEN_DIR
+	cmp eax, -13	; EACCES Permission denied, we won't be able to rcp over it
+	je .ret			; so skip it.
+	cmp rax, 0
+	jl handle_dir_err
 
 	; rax will be fd we just opened
 	mov [dir_fd_ptr], rax ; save open directory fd
@@ -252,6 +255,7 @@ handle_dir:
 	safe_syscall
 	err_check EM_CLOSE
 
+.ret:
 	ret
 
 
@@ -269,7 +273,11 @@ process_single:
 	cmp BYTE [rbx+dirent64.d_type], DT_REG
 	je .crc_file
 
-	; it's a dir, should we skip it? ('.' and '..')
+	; it's not a file - is it a directory?
+	cmp BYTE [rbx+dirent64.d_type], DT_DIR
+	jne .move_to_next_record ; if it's not file or dir, skip
+
+	; it's a directory, should we skip it? ('.' and '..')
 	xor edi, edi
 	mov di, WORD [rbx+dirent64.d_name] ; filename field of struct
 	call is_ignore_dir
@@ -389,7 +397,10 @@ crc_print:
 	mov esi, 0x80000 ; flags: O_RDONLY (0) | O_CLOEXEC (octal 0o2000000)
 	mov eax, SYS_OPEN
 	safe_syscall
+	cmp eax, -13 ; EACCES Permission denied - skip this file
+	je .ret
 	err_check EM_OPEN_FILE
+
 	mov [file_fd_ptr], rax
 
 	; space to put stat buffer, on the stack
@@ -471,6 +482,7 @@ crc_print:
 	safe_syscall
 	err_check EM_CLOSE
 
+.ret:
 	pop r10
 	pop r9
 	pop r8
@@ -502,6 +514,23 @@ is_ignore_dir:
 
 	pop rbx
 	ret
+
+;;
+;; err handling for handle_dir. it's special so that we can print the
+;; dir we failed to open.
+;;
+;; rax: err code from syscall
+;; rdi: the dir we tried to open
+handle_dir_err:
+
+	; print the dir we tried to open
+	call print
+	mov edi, CR
+	call print
+
+	; err code from syscall is still in rax
+	mov rdi, EM_OPEN_DIR
+	jmp err
 
 ;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility functions ;;
