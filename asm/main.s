@@ -220,10 +220,6 @@ handle_dir:
 
 	sub rsp, BUF_SIZE
 
-	; zeroed registers for zeroing memory later
-	vpxord zmm0, zmm0, zmm0
-	vpxord zmm3, zmm3, zmm3
-
 	; get directory entries
 
 .next_files_chunk:
@@ -325,7 +321,11 @@ process_single:
 
 	; it's a file
 .crc_file:
+
 	; zero path memory using AVX-512 instructions
+	; we have to reset zmm0 because strlen uses xmm0
+	vpxord zmm0, zmm0, zmm0
+	vpxord zmm3, zmm3, zmm3
 	vmovdqa64 [path_ptr], zmm0
 	vmovdqa64 [path_ptr+64], zmm3
 	vmovdqa64 [path_ptr+128], zmm0
@@ -562,6 +562,7 @@ print_err:
 ;;
 ;; strlen: Length of null-terminated string with addr in rdi
 ;; length returned in rax
+;; OVERWRITES xmm0/ymm0/zmm0
 ;;
 strlen:
 	push rcx
