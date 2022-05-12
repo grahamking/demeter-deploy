@@ -188,6 +188,12 @@ _start:
 	syscall
 	err_check EM_CHDIR
 
+	; zero the registers we use to clear path_ptr
+	; those are either not modified during the program or reset (xmm0 in strlen)
+	; so safe to do just once
+	vpxord zmm0, zmm0, zmm0
+	vpxord zmm3, zmm3, zmm3
+
 	; start in current directory
 	xor eax, eax
 	mov ax, [DOT_DIR]
@@ -323,9 +329,6 @@ process_single:
 .crc_file:
 
 	; zero path memory using AVX-512 instructions
-	; we have to reset zmm0 because strlen uses xmm0
-	vpxord zmm0, zmm0, zmm0
-	vpxord zmm3, zmm3, zmm3
 	vmovdqa64 [path_ptr], zmm0
 	vmovdqa64 [path_ptr+64], zmm3
 	vmovdqa64 [path_ptr+128], zmm0
@@ -567,6 +570,8 @@ print_err:
 strlen:
 	push rcx
 	push rdx
+	sub rsp, 16
+	movdqu [rsp], xmm0
 
 	xor eax, eax
 	mov edx, 0xFF01		; range(01..FF), i.e. everything except null byte
@@ -585,6 +590,8 @@ strlen:
 	jnz .next
 	add eax, ecx
 
+	movdqu xmm0, [rsp]
+	add rsp, 16
 	pop rdx
 	pop rcx
 	ret
