@@ -56,6 +56,7 @@ section .data align=16
 	USAGE: db `Usage: rcple-h <dir>\n\0`
 	CR: db "",10,0  ; 0 is the terminating null byte
 	SPACE: db " ",0
+	COLON: db ":",0
 	BUF_SIZE: equ 32768 ; read 32k of directory entries at a time
 	DT_DIR: equ 4 ; directory
 	DT_REG: equ 8 ; regular file
@@ -389,8 +390,9 @@ crc_print:
 	mov r10, rdi ; print does not preserve rdi
 	call print
 
-	; print a space
-	mov edi, SPACE
+	; print a character to separate filename and CRC
+	; we use a colon for human readiness. a null byte would be more correct.
+	mov edi, COLON
 	call print
 
 	; next calculate crc32, we print it at end of function
