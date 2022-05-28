@@ -6,6 +6,11 @@ use std::os::raw::{c_char, c_int, c_void};
 
 use anyhow::anyhow;
 
+// These are in libc crate, but no dependencies is nice
+const O_WRONLY: c_int = 1;
+const O_CREAT: c_int = 0o100;
+const O_TRUNC: c_int = 0o1000;
+
 // TODO: for all the SSHResult returns, if ERROR call ssh_get_error like on ssh_connect
 // for sftp maybe call sftp_get_error ?
 
@@ -19,10 +24,12 @@ pub struct SSH {
 }
 
 impl SSH {
-
     // libssh version
     pub fn version() -> String {
-        unsafe { CStr::from_ptr(ssh_version(0)) }.to_str().unwrap().to_string()
+        unsafe { CStr::from_ptr(ssh_version(0)) }
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 
     // connect and authenticate
@@ -118,17 +125,24 @@ impl SSH {
         })
     }
 
-    /*
-    pub fn upload(&self, filename: &str, from_dir: &str, to_dir: &str) -> Result<(), anyhow::Error> {
-        let sftp = ssh.sftp()?;
-        let sfile = sftp.open("/tmp/rcple-h", O_WRONLY | O_CREAT | O_TRUNC, 0o700);
-        let bytes_written = sfile.write(&helper_bytes);
-        if bytes_written != helper_bytes.len() {
-            eprintln!("Short write: {bytes_written} / {}", helper_bytes.len());
+    // Upload a local file to remote
+    //
+    // src: local full path of filename to upload
+    // dst: remote full path of destination file to create or overwrite
+    pub fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
+        let data = std::fs::read(src)?; // todo: read in chunks
+
+        let sftp = self.sftp()?;
+        let sfile = sftp.open(&dst, O_WRONLY | O_CREAT | O_TRUNC, 0o700)?;
+        let bytes_written = sfile.write(&data);
+        if bytes_written != data.len() {
+            return Err(anyhow::anyhow!(
+                "Short write: {bytes_written} / {}",
+                data.len()
+            ));
         }
         Ok(())
     }
-    */
 }
 
 impl Drop for SSH {
@@ -145,10 +159,13 @@ pub struct SFTP {
 }
 
 impl SFTP {
-    pub fn open(&self, filename: &str, mode: i32, perms: i32) -> SFTPFile {
+    pub fn open(&self, filename: &str, mode: i32, perms: i32) -> Result<SFTPFile, anyhow::Error> {
         let remote_filename = CString::new(filename).unwrap();
         let handle = unsafe { sftp_open(self.session, remote_filename.as_ptr(), mode, perms) };
-        SFTPFile { handle }
+        if handle.is_null() {
+            return Err(anyhow::anyhow!("sftp_open remote {filename}"));
+        }
+        Ok(SFTPFile { handle })
     }
 }
 

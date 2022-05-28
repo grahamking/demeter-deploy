@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{BufReader, Read};
-use std::os::raw::c_int;
 use std::path;
 use std::process;
 
@@ -17,11 +16,6 @@ const USAGE: &str = r#"USAGE: rcple src_dir remote_dst_dir
 
 const CRC32: u64 = 0xFFFFFFFF;
 const HELPER: &str = "/home/graham/src/rcple/asm/rcple-h";
-
-// These are in libc crate, but no dependencies is nice
-const O_WRONLY: c_int = 1;
-const O_CREAT: c_int = 0o100;
-const O_TRUNC: c_int = 0o1000;
 
 fn main() -> Result<(), anyhow::Error> {
     let verbose = false; // will become a cmd line flag
@@ -37,15 +31,15 @@ fn main() -> Result<(), anyhow::Error> {
     if !src_dir.ends_with("/") {
         src_dir.push('/');
     }
-    let dst_dir = args.next().unwrap();
+    let mut dst_dir = args.next().unwrap();
+    if !dst_dir.ends_with("/") {
+        dst_dir.push('/');
+    }
 
     // check we have the helper binary
-    let helper_bytes = match fs::read(HELPER) {
-        Ok(b) => b,
-        Err(err) => {
-            eprintln!("Missing helper binary. open '{}': {}.", HELPER, err);
-            return Ok(());
-        }
+    if !std::path::Path::new(HELPER).exists() {
+        eprintln!("Helper binary '{}' not found.", HELPER);
+        return Ok(());
     };
 
     // local
@@ -64,16 +58,7 @@ fn main() -> Result<(), anyhow::Error> {
         println!("Using libssh {}", SSH::version());
     }
     let ssh = SSH::new("localhost", "graham", ssh::LogLevel::WARNING)?;
-
-    let sftp = ssh.sftp()?;
-    let sfile = sftp.open("/tmp/rcple-h", O_WRONLY | O_CREAT | O_TRUNC, 0o700);
-    let bytes_written = sfile.write(&helper_bytes);
-    if bytes_written != helper_bytes.len() {
-        eprintln!("Short write: {bytes_written} / {}", helper_bytes.len());
-        return Ok(());
-    }
-    drop(sfile);
-    drop(sftp);
+    ssh.upload(HELPER, "/tmp/rcple-h")?;
 
     let output = ssh.run_remote_cmd(&format!("/tmp/rcple-h {}", dst_dir))?;
 
@@ -96,14 +81,14 @@ fn main() -> Result<(), anyhow::Error> {
                     println!("Upload new: {}", filename);
                 }
                 upload.push(filename);
-            },
+            }
             Some(r_crc32) if r_crc32 != l_crc32 => {
                 if verbose {
                     println!("Upload changed: {}", filename);
                 }
                 upload.push(filename);
-            },
-            _ => {}, // they are the same
+            }
+            _ => {} // they are the same
         }
     }
     println!("Upload: {upload:?}");
@@ -121,11 +106,12 @@ fn main() -> Result<(), anyhow::Error> {
 
     // action
 
-    /*
     for filename in upload {
-        ssh.upload(filename, src_dir, dst_dir);
+        ssh.upload(
+            &format!("{src_dir}{filename}"),
+            &format!("{dst_dir}{filename}"),
+        )?;
     }
-    */
 
     Ok(())
 }
@@ -167,7 +153,11 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
                     }
                 }
                 out.insert(
-                    file.path().to_string_lossy().get(path_len..).unwrap().to_string(),
+                    file.path()
+                        .to_string_lossy()
+                        .get(path_len..)
+                        .unwrap()
+                        .to_string(),
                     (checksum & CRC32) as u32,
                 );
             }
@@ -179,7 +169,7 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
 /* TODO
  - flag for dry-run
  - flag to skip dot (hidden) files (or to include them)
- - adding missing directories
+ - adding missing directories - sftp_mkdir
     maybe put in output as <dir_path>:DIR? then we know it's an add or remove
  - local and remote each in a thread
  - rcpl-h (asm) if file > size crc in a thread (with max thread as num CPUs)
