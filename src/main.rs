@@ -24,6 +24,8 @@ const O_CREAT: c_int = 0o100;
 const O_TRUNC: c_int = 0o1000;
 
 fn main() -> Result<(), anyhow::Error> {
+    let verbose = false; // will become a cmd line flag
+
     let mut args = env::args();
     if args.len() != 3 {
         eprintln!("{}", USAGE);
@@ -58,6 +60,9 @@ fn main() -> Result<(), anyhow::Error> {
 
     // remote
 
+    if verbose {
+        println!("Using libssh {}", SSH::version());
+    }
     let ssh = SSH::new("localhost", "graham", ssh::LogLevel::WARNING)?;
 
     let sftp = ssh.sftp()?;
@@ -82,27 +87,51 @@ fn main() -> Result<(), anyhow::Error> {
 
     // compare
 
-    for (filename, ref l_crc32) in local {
-        let r_filename = filename.replacen(&src_dir, "./", 1);
-        match remote.get(r_filename.as_str()) {
+    let mut upload = Vec::new();
+    for (filename, l_crc32) in local.iter() {
+        //let r_filename = filename.replacen(&src_dir, "./", 1);
+        match remote.get(filename.as_str()) {
             None => {
-                println!("Upload new: {}", filename);
+                if verbose {
+                    println!("Upload new: {}", filename);
+                }
+                upload.push(filename);
             },
             Some(r_crc32) if r_crc32 != l_crc32 => {
-                println!("Upload changed: {}", filename);
+                if verbose {
+                    println!("Upload changed: {}", filename);
+                }
+                upload.push(filename);
             },
             _ => {}, // they are the same
         }
     }
+    println!("Upload: {upload:?}");
 
-    // now that we both local and remote compare and upload the differences
-    // catching new files, and deleting removed files
-    // TODO add a --dry-run flag
+    let mut delete = Vec::new();
+    for (filename, _) in remote {
+        if !local.contains_key(filename) {
+            if verbose {
+                println!("Delete remote: {}", filename);
+            }
+            delete.push(filename);
+        }
+    }
+    println!("Delete: {delete:?}");
+
+    // action
+
+    /*
+    for filename in upload {
+        ssh.upload(filename, src_dir, dst_dir);
+    }
+    */
 
     Ok(())
 }
 
 fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Error> {
+    let path_len = path.to_string_lossy().len();
     let mut out = HashMap::with_capacity(64);
     let mut dirs = vec![path];
 
@@ -138,7 +167,7 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
                     }
                 }
                 out.insert(
-                    file.path().to_string_lossy().into_owned(),
+                    file.path().to_string_lossy().get(path_len..).unwrap().to_string(),
                     (checksum & CRC32) as u32,
                 );
             }
@@ -148,8 +177,10 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
 }
 
 /* TODO
- - delete (file remote but not local)
+ - flag for dry-run
  - flag to skip dot (hidden) files (or to include them)
+ - adding missing directories
+    maybe put in output as <dir_path>:DIR? then we know it's an add or remove
  - local and remote each in a thread
  - rcpl-h (asm) if file > size crc in a thread (with max thread as num CPUs)
 */

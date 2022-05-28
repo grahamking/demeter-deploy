@@ -388,6 +388,7 @@ crc_print:
 
 	; print the filename
 	mov r10, rdi ; print does not preserve rdi
+	add rdi, 2   ; skip the "./" path prefix
 	call print
 
 	; print a character to separate filename and CRC

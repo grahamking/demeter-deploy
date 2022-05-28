@@ -19,6 +19,12 @@ pub struct SSH {
 }
 
 impl SSH {
+
+    // libssh version
+    pub fn version() -> String {
+        unsafe { CStr::from_ptr(ssh_version(0)) }.to_str().unwrap().to_string()
+    }
+
     // connect and authenticate
     pub fn new(host: &str, username: &str, log_level: LogLevel) -> Result<SSH, anyhow::Error> {
         let host = CString::new(host).unwrap();
@@ -111,6 +117,18 @@ impl SSH {
             session: sftp_session,
         })
     }
+
+    /*
+    pub fn upload(&self, filename: &str, from_dir: &str, to_dir: &str) -> Result<(), anyhow::Error> {
+        let sftp = ssh.sftp()?;
+        let sfile = sftp.open("/tmp/rcple-h", O_WRONLY | O_CREAT | O_TRUNC, 0o700);
+        let bytes_written = sfile.write(&helper_bytes);
+        if bytes_written != helper_bytes.len() {
+            eprintln!("Short write: {bytes_written} / {}", helper_bytes.len());
+        }
+        Ok(())
+    }
+    */
 }
 
 impl Drop for SSH {
@@ -277,6 +295,7 @@ enum SSHAuthResult {
 
 #[link(name = "ssh")]
 extern "C" {
+    fn ssh_version(min: c_int) -> *const c_char;
     fn ssh_set_log_level(level: LogLevel) -> c_int;
     fn ssh_options_set(s: SSHSession, opt_type: SSHOption, value: *const c_void) -> c_int;
 
