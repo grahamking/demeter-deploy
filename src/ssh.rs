@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(non_camel_case_types)]
+#![allow(clippy::upper_case_acronyms)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
@@ -12,7 +13,7 @@ const O_CREAT: c_int = 0o100;
 const O_TRUNC: c_int = 0o1000;
 
 // TODO: for all the SSHResult returns, if ERROR call ssh_get_error like on ssh_connect
-// for sftp maybe call sftp_get_error ?
+// For sftp maybe (also?) call sftp_get_error
 
 //
 // Public API
@@ -20,7 +21,8 @@ const O_TRUNC: c_int = 0o1000;
 //
 
 pub struct SSH {
-    session: *mut c_void,
+    sftp_session: SFTP, // comes first because must be dropped before 'session'
+    session: SSHSessionWrap,
 }
 
 impl SSH {
@@ -68,11 +70,27 @@ impl SSH {
             }
         };
 
-        Ok(SSH { session })
+        let sftp_session = SSH::create_sftp(session)?;
+        Ok(SSH {
+            session: SSHSessionWrap(session),
+            sftp_session,
+        })
+    }
+
+    fn create_sftp(session: *mut c_void) -> Result<SFTP, anyhow::Error> {
+        let sftp_session = unsafe { sftp_new(session) };
+        let sftp_init_ret = unsafe { sftp_init(sftp_session) };
+        if matches!(sftp_init_ret, SSHResult::ERROR) {
+            let err_msg = unsafe { CStr::from_ptr(ssh_get_error(session)) };
+            return Err(anyhow!("SFTP init ERR: {}", err_msg.to_string_lossy()));
+        }
+        Ok(SFTP {
+            session: sftp_session,
+        })
     }
 
     pub fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error> {
-        let channel = unsafe { ssh_channel_new(self.session) };
+        let channel = unsafe { ssh_channel_new(self.session.0) };
         if channel.is_null() {
             return Err(anyhow!("channel is null"));
         }
@@ -113,16 +131,8 @@ impl SSH {
         Ok(output)
     }
 
-    pub fn sftp(&self) -> Result<SFTP, anyhow::Error> {
-        let sftp_session = unsafe { sftp_new(self.session) };
-        let sftp_init_ret = unsafe { sftp_init(sftp_session) };
-        if matches!(sftp_init_ret, SSHResult::ERROR) {
-            let err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session)) };
-            return Err(anyhow!("SFTP init ERR: {}", err_msg.to_string_lossy()));
-        }
-        Ok(SFTP {
-            session: sftp_session,
-        })
+    pub fn sftp(&mut self) -> &SFTP {
+        &self.sftp_session
     }
 
     // Upload a local file to remote
@@ -132,8 +142,9 @@ impl SSH {
     pub fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
         let data = std::fs::read(src)?; // todo: read in chunks
 
-        let sftp = self.sftp()?;
-        let sfile = sftp.open(&dst, O_WRONLY | O_CREAT | O_TRUNC, 0o700)?;
+        let sfile = self
+            .sftp_session
+            .open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0o700)?;
         let bytes_written = sfile.write(&data);
         if bytes_written != data.len() {
             return Err(anyhow::anyhow!(
@@ -143,13 +154,34 @@ impl SSH {
         }
         Ok(())
     }
+
+    // make remote directory
+    pub fn mkdir(&self, dir: &str, perms: i32) -> Result<(), anyhow::Error> {
+        let c_dir = CString::new(dir).unwrap();
+        let ret = unsafe { sftp_mkdir(self.sftp_session.session, c_dir.as_ptr(), perms) };
+        if matches!(ret, SSHResult::ERROR) {
+            let sftp_err_num = unsafe { sftp_get_error(self.sftp_session.session) };
+            if sftp_err_num != SFTPError::SSH_FX_FILE_ALREADY_EXISTS {
+                let ssh_err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
+                return Err(anyhow!(
+                    "mkdir: {}. SFTP err num: {:?}.",
+                    ssh_err_msg.to_string_lossy(),
+                    sftp_err_num
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
-impl Drop for SSH {
+// Wrap the pointer so we can implement Drop
+struct SSHSessionWrap(*mut c_void);
+
+impl Drop for SSHSessionWrap {
     fn drop(&mut self) {
         unsafe {
-            ssh_disconnect(self.session);
-            ssh_free(self.session);
+            ssh_disconnect(self.0);
+            ssh_free(self.0);
         }
     }
 }
@@ -262,7 +294,7 @@ enum SSHKnownHostsResult {
     HOSTS_OTHER = 3,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[repr(u32)]
 enum SFTPError {
     /** No error */
@@ -339,6 +371,7 @@ extern "C" {
     fn sftp_free(sftp: SFTPSession);
     fn sftp_init(sftp: SFTPSession) -> SSHResult;
     fn sftp_get_error(sftp: SFTPSession) -> SFTPError;
+    fn sftp_mkdir(sftp: SFTPSession, dir: *const c_char, perms: c_int) -> SSHResult;
 
     fn sftp_open(
         sftp: SFTPSession,

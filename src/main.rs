@@ -1,12 +1,10 @@
 use core::arch::x86_64::_mm_crc32_u64;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path;
 use std::process;
-
-use anyhow;
 
 mod ssh;
 use ssh::SSH;
@@ -18,7 +16,7 @@ const CRC32: u64 = 0xFFFFFFFF;
 const HELPER: &str = "/home/graham/src/rcple/asm/rcple-h";
 
 fn main() -> Result<(), anyhow::Error> {
-    let verbose = false; // will become a cmd line flag
+    let verbose = true; // will become a cmd line flag
 
     let mut args = env::args();
     if args.len() != 3 {
@@ -28,16 +26,16 @@ fn main() -> Result<(), anyhow::Error> {
 
     args.next(); // skip program name
     let mut src_dir = args.next().unwrap();
-    if !src_dir.ends_with("/") {
+    if !src_dir.ends_with('/') {
         src_dir.push('/');
     }
     let mut dst_dir = args.next().unwrap();
-    if !dst_dir.ends_with("/") {
+    if !dst_dir.ends_with('/') {
         dst_dir.push('/');
     }
 
     // check we have the helper binary
-    if !std::path::Path::new(HELPER).exists() {
+    if !path::Path::new(HELPER).exists() {
         eprintln!("Helper binary '{}' not found.", HELPER);
         return Ok(());
     };
@@ -74,7 +72,6 @@ fn main() -> Result<(), anyhow::Error> {
 
     let mut upload = Vec::new();
     for (filename, l_crc32) in local.iter() {
-        //let r_filename = filename.replacen(&src_dir, "./", 1);
         match remote.get(filename.as_str()) {
             None => {
                 if verbose {
@@ -91,10 +88,15 @@ fn main() -> Result<(), anyhow::Error> {
             _ => {} // they are the same
         }
     }
-    println!("Upload: {upload:?}");
 
     let mut delete = Vec::new();
+    let mut remote_dirs = HashSet::with_capacity(64);
     for (filename, _) in remote {
+        let p = path::PathBuf::from(filename);
+        if let Some(dir) = p.parent() {
+            remote_dirs.insert(dir.to_path_buf());
+        }
+
         if !local.contains_key(filename) {
             if verbose {
                 println!("Delete remote: {}", filename);
@@ -102,15 +104,37 @@ fn main() -> Result<(), anyhow::Error> {
             delete.push(filename);
         }
     }
-    println!("Delete: {delete:?}");
 
     // action
 
     for filename in upload {
+        // Do we need to make the parent dir(s)?
+        let p = path::PathBuf::from(filename);
+        if let Some(dir) = p.parent() {
+            if !remote_dirs.contains(dir) {
+                if verbose {
+                    println!("mkdir remote: {}", dir.display());
+                }
+                for component in dir
+                    .ancestors()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .skip(1)
+                {
+                    ssh.mkdir(&format!("{dst_dir}{}", component.display()), 0o755)?;
+                    remote_dirs.insert(component.to_path_buf());
+                }
+            }
+        }
         ssh.upload(
             &format!("{src_dir}{filename}"),
             &format!("{dst_dir}{filename}"),
         )?;
+    }
+
+    for filename in delete {
+        // TODO: work here
     }
 
     Ok(())
