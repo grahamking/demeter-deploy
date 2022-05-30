@@ -3,14 +3,20 @@
 #![allow(clippy::upper_case_acronyms)]
 
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
+use std::fs;
+use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::os::unix::fs::PermissionsExt;
 
 use anyhow::anyhow;
 
 // These are in libc crate, but no dependencies is nice
-const O_WRONLY: c_int = 1;
-const O_CREAT: c_int = 0o100;
-const O_TRUNC: c_int = 0o1000;
+const O_WRONLY: c_uint = 1;
+const O_CREAT: c_uint = 0o100;
+const O_TRUNC: c_uint = 0o1000;
+
+// Give libssh data in chunks of 128 KiB. I think an sftp packet is 32 KiB.
+// Has to be under 256 KiB or things start to break.
+const SFTP_CHUNK_SIZE: usize = 128 * 1024;
 
 // TODO: for all the SSHResult returns, if ERROR call ssh_get_error like on ssh_connect
 // For sftp maybe (also?) call sftp_get_error
@@ -19,6 +25,13 @@ const O_TRUNC: c_int = 0o1000;
 // Public API
 // Start with: SSH::new
 //
+
+pub trait Remote {
+    fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error>;
+    fn mkdir(&self, dir: &str, perms: u32) -> Result<(), anyhow::Error>;
+    fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error>;
+    fn delete(&self, path: &str) -> Result<(), anyhow::Error>;
+}
 
 pub struct SSH {
     sftp_session: SFTP, // comes first because must be dropped before 'session'
@@ -89,7 +102,24 @@ impl SSH {
         })
     }
 
-    pub fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error> {
+    pub fn sftp(&mut self) -> &SFTP {
+        &self.sftp_session
+    }
+
+    fn get_sftp_err(&self, msg: &str) -> anyhow::Error {
+        let ssh_err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
+        let sftp_err_num = unsafe { sftp_get_error(self.sftp_session.session) };
+        anyhow!(
+            "{}: {}. SFTP err num: {:?}.",
+            msg,
+            ssh_err_msg.to_string_lossy(),
+            sftp_err_num
+        )
+    }
+}
+
+impl Remote for SSH {
+    fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error> {
         let channel = unsafe { ssh_channel_new(self.session.0) };
         if channel.is_null() {
             return Err(anyhow!("channel is null"));
@@ -131,33 +161,38 @@ impl SSH {
         Ok(output)
     }
 
-    pub fn sftp(&mut self) -> &SFTP {
-        &self.sftp_session
-    }
-
     // Upload a local file to remote
     //
     // src: local full path of filename to upload
     // dst: remote full path of destination file to create or overwrite
-    pub fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
-        let data = std::fs::read(src)?; // todo: read in chunks
+    fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
+        let data = fs::read(src)?; // todo: read in chunks of SFTP_CHUNK_SIZE
+        let perms = fs::metadata(src)?.permissions().mode();
 
         let sfile = self
             .sftp_session
-            .open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0o700)?;
-        let bytes_written = sfile.write(&data);
-        if bytes_written != data.len() {
-            return Err(anyhow::anyhow!(
-                "Short write: {bytes_written} / {}",
-                data.len()
-            ));
+            .open(dst, O_WRONLY | O_CREAT | O_TRUNC, perms)?;
+        //println!("upload {} -> {}", src, dst);
+
+        for chunk in data.chunks(SFTP_CHUNK_SIZE) {
+            let ret = sfile.write(chunk);
+            if ret < 0 {
+                return Err(self.get_sftp_err(&format!("upload to {}", dst)));
+            }
+            let bytes_written = ret as usize;
+            if bytes_written != chunk.len() {
+                return Err(anyhow::anyhow!(
+                    "Short write: {bytes_written} / {}",
+                    chunk.len()
+                ));
+            }
         }
         Ok(())
     }
 
     // make remote directory
-    pub fn mkdir(&self, dir: &str, perms: i32) -> Result<(), anyhow::Error> {
-        let c_dir = CString::new(dir).unwrap();
+    fn mkdir(&self, dir: &str, perms: u32) -> Result<(), anyhow::Error> {
+        let c_dir = CString::new(dir)?;
         let ret = unsafe { sftp_mkdir(self.sftp_session.session, c_dir.as_ptr(), perms) };
         if matches!(ret, SSHResult::ERROR) {
             let sftp_err_num = unsafe { sftp_get_error(self.sftp_session.session) };
@@ -169,6 +204,16 @@ impl SSH {
                     sftp_err_num
                 ));
             }
+        }
+        Ok(())
+    }
+
+    // delete a remote file
+    fn delete(&self, path: &str) -> Result<(), anyhow::Error> {
+        let c_path = CString::new(path)?;
+        let ret = unsafe { sftp_unlink(self.sftp_session.session, c_path.as_ptr()) };
+        if matches!(ret, SSHResult::ERROR) {
+            return Err(self.get_sftp_err(&format!("delete {}", path)));
         }
         Ok(())
     }
@@ -191,7 +236,7 @@ pub struct SFTP {
 }
 
 impl SFTP {
-    pub fn open(&self, filename: &str, mode: i32, perms: i32) -> Result<SFTPFile, anyhow::Error> {
+    pub fn open(&self, filename: &str, mode: u32, perms: u32) -> Result<SFTPFile, anyhow::Error> {
         let remote_filename = CString::new(filename).unwrap();
         let handle = unsafe { sftp_open(self.session, remote_filename.as_ptr(), mode, perms) };
         if handle.is_null() {
@@ -214,8 +259,9 @@ pub struct SFTPFile {
 }
 
 impl SFTPFile {
-    pub fn write(&self, data: &[u8]) -> usize {
-        unsafe { sftp_write(self.handle, data.as_ptr(), data.len() as i32) as usize }
+    pub fn write(&self, data: &[u8]) -> i32 {
+        //println!("SFTPFile.write {} bytes", data.len() as u32);
+        unsafe { sftp_write(self.handle, data.as_ptr(), data.len() as u32) }
     }
 }
 
@@ -235,6 +281,27 @@ pub enum LogLevel {
     PROTOCOL,  // High level protocol information
     PACKET,    // Lower level protocol infomations, packet level
     FUNCTIONS, // Every function path
+}
+
+pub struct MockSSH {}
+
+impl Remote for MockSSH {
+    fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error> {
+        println!("would run cmd '{cmd}'");
+        Ok("".to_string())
+    }
+    fn mkdir(&self, dir: &str, perms: u32) -> Result<(), anyhow::Error> {
+        println!("would mkdir {dir} with perms {perms:o}");
+        Ok(())
+    }
+    fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
+        println!("would upload {src} -> {dst}");
+        Ok(())
+    }
+    fn delete(&self, path: &str) -> Result<(), anyhow::Error> {
+        println!("would delete {path}");
+        Ok(())
+    }
 }
 
 //
@@ -344,7 +411,7 @@ enum SSHAuthResult {
 
 #[link(name = "ssh")]
 extern "C" {
-    fn ssh_version(min: c_int) -> *const c_char;
+    fn ssh_version(min: c_uint) -> *const c_char;
     fn ssh_set_log_level(level: LogLevel) -> c_int;
     fn ssh_options_set(s: SSHSession, opt_type: SSHOption, value: *const c_void) -> c_int;
 
@@ -363,7 +430,7 @@ extern "C" {
     fn ssh_channel_free(c: SSHChannel);
     fn ssh_channel_open_session(c: SSHChannel) -> SSHResult;
     fn ssh_channel_request_exec(c: SSHChannel, cmd: *const c_char) -> SSHResult;
-    fn ssh_channel_read(c: SSHChannel, dest: *mut u8, count: u32, is_stderr: c_int) -> c_int;
+    fn ssh_channel_read(c: SSHChannel, dest: *mut u8, count: u32, is_stderr: c_uint) -> c_int;
     fn ssh_channel_send_eof(c: SSHChannel);
     fn ssh_channel_close(c: SSHChannel);
 
@@ -371,15 +438,16 @@ extern "C" {
     fn sftp_free(sftp: SFTPSession);
     fn sftp_init(sftp: SFTPSession) -> SSHResult;
     fn sftp_get_error(sftp: SFTPSession) -> SFTPError;
-    fn sftp_mkdir(sftp: SFTPSession, dir: *const c_char, perms: c_int) -> SSHResult;
+    fn sftp_mkdir(sftp: SFTPSession, dir: *const c_char, perms: c_uint) -> SSHResult;
+    fn sftp_unlink(sftp: SFTPSession, path: *const c_char) -> SSHResult;
 
     fn sftp_open(
         sftp: SFTPSession,
         file: *const c_char,
-        accesstype: c_int,
-        mode: c_int,
+        accesstype: c_uint,
+        mode: c_uint,
     ) -> SFTPFileHandle;
-    fn sftp_write(sfile: SFTPFileHandle, buf: *const u8, count: c_int) -> c_int;
+    fn sftp_write(sfile: SFTPFileHandle, buf: *const u8, count: c_uint) -> i32;
     fn sftp_close(sfile: SFTPFileHandle) -> SSHResult;
 
     //fn ssh_userauth_publickey(

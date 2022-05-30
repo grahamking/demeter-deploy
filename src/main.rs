@@ -1,35 +1,40 @@
 use core::arch::x86_64::_mm_crc32_u64;
 use std::collections::{HashMap, HashSet};
-use std::env;
+//use std::env;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path;
 use std::process;
 
-mod ssh;
-use ssh::SSH;
+use clap::arg;
 
-const USAGE: &str = r#"USAGE: rcple src_dir remote_dst_dir
-       Example: rcple /home/graham/myfiles graham@myhost.com:/var/www/myfiles"#;
+mod ssh;
+use ssh::{MockSSH, Remote, SSH};
+
+const DESC: &str = r#"Example: rcple /home/graham/myfiles graham@myhost.com:/var/www/myfiles
+The format is intentionally the same as `rcp`."#;
 
 const CRC32: u64 = 0xFFFFFFFF;
 const HELPER: &str = "/home/graham/src/rcple/asm/rcple-h";
 
 fn main() -> Result<(), anyhow::Error> {
-    let verbose = true; // will become a cmd line flag
+    let args = clap::Command::new("rcple src_dir user@host:remote_dst_dir")
+        .about(DESC)
+        .arg(arg!(-v --verbose "Debug level output").required(false))
+        .arg(arg!(-d --"dry-run" "Show what we would do without doing it").required(false))
+        .arg(arg!([src_dir] "Local directory to copy from").required(true))
+        .arg(arg!([remote] "Remote to copy to in format user@host:/dir/").required(true))
+        .get_matches();
 
-    let mut args = env::args();
-    if args.len() != 3 {
-        eprintln!("{}", USAGE);
-        process::exit(1);
-    }
+    let verbose = args.is_present("verbose");
+    let is_dry_run = args.is_present("dry-run");
 
-    args.next(); // skip program name
-    let mut src_dir = args.next().unwrap();
+    // clap makes sure these two are populated, we don't need to check
+    let mut src_dir = args.value_of("src_dir").unwrap().to_string();
+    let mut dst_dir = args.value_of("remote").unwrap().to_string();
     if !src_dir.ends_with('/') {
         src_dir.push('/');
     }
-    let mut dst_dir = args.next().unwrap();
     if !dst_dir.ends_with('/') {
         dst_dir.push('/');
     }
@@ -55,7 +60,9 @@ fn main() -> Result<(), anyhow::Error> {
     if verbose {
         println!("Using libssh {}", SSH::version());
     }
-    let ssh = SSH::new("localhost", "graham", ssh::LogLevel::WARNING)?;
+    let real_ssh = SSH::new("localhost", "graham", ssh::LogLevel::WARNING)?;
+    let mut ssh: Box<dyn Remote> = Box::new(real_ssh);
+
     ssh.upload(HELPER, "/tmp/rcple-h")?;
 
     let output = ssh.run_remote_cmd(&format!("/tmp/rcple-h {}", dst_dir))?;
@@ -74,15 +81,9 @@ fn main() -> Result<(), anyhow::Error> {
     for (filename, l_crc32) in local.iter() {
         match remote.get(filename.as_str()) {
             None => {
-                if verbose {
-                    println!("Upload new: {}", filename);
-                }
                 upload.push(filename);
             }
             Some(r_crc32) if r_crc32 != l_crc32 => {
-                if verbose {
-                    println!("Upload changed: {}", filename);
-                }
                 upload.push(filename);
             }
             _ => {} // they are the same
@@ -98,11 +99,17 @@ fn main() -> Result<(), anyhow::Error> {
         }
 
         if !local.contains_key(filename) {
-            if verbose {
-                println!("Delete remote: {}", filename);
-            }
             delete.push(filename);
         }
+    }
+
+    if verbose {
+        println!("Upload: {:?}", upload);
+        println!("Delete: {:?}", delete);
+    }
+
+    if is_dry_run {
+        ssh = Box::new(MockSSH {});
     }
 
     // action
@@ -111,7 +118,7 @@ fn main() -> Result<(), anyhow::Error> {
         // Do we need to make the parent dir(s)?
         let p = path::PathBuf::from(filename);
         if let Some(dir) = p.parent() {
-            if !remote_dirs.contains(dir) {
+            if !dir.as_os_str().is_empty() && !remote_dirs.contains(dir) {
                 if verbose {
                     println!("mkdir remote: {}", dir.display());
                 }
@@ -134,7 +141,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     for filename in delete {
-        // TODO: work here
+        ssh.delete(&format!("{dst_dir}{}", filename))?;
     }
 
     Ok(())
@@ -191,10 +198,16 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
 }
 
 /* TODO
- - flag for dry-run
+ - parse out username and host from remote. rename 'dst_dir'.
+ - 'upload' should read files in SFTP_CHUNK_SIZE chunks, uploading
+    before reading next
+ - For all the SSHResult returns, if ERROR call ssh_get_error like on ssh_connect
+    For sftp maybe call sftp_get_error
  - flag to skip dot (hidden) files (or to include them)
- - adding missing directories - sftp_mkdir
-    maybe put in output as <dir_path>:DIR? then we know it's an add or remove
+ - nice output showing
+   - how many files done / remain
+   - files uploading chunk by chunk
  - local and remote each in a thread
  - rcpl-h (asm) if file > size crc in a thread (with max thread as num CPUs)
+ - rcpl-h (asm) make it as small as possible
 */
