@@ -6,6 +6,7 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::os::unix::fs::PermissionsExt;
+use std::io::Read;
 
 use anyhow::anyhow;
 
@@ -14,12 +15,10 @@ const O_WRONLY: c_uint = 1;
 const O_CREAT: c_uint = 0o100;
 const O_TRUNC: c_uint = 0o1000;
 
-// Give libssh data in chunks of 128 KiB. I think an sftp packet is 32 KiB.
+// Give libssh data in chunks of 64 KiB (cache line).
+// I think an sftp packet is 32 KiB.
 // Has to be under 256 KiB or things start to break.
-const SFTP_CHUNK_SIZE: usize = 128 * 1024;
-
-// TODO: for all the SSHResult returns, if ERROR call ssh_get_error like on ssh_connect
-// For sftp maybe (also?) call sftp_get_error
+const SFTP_CHUNK_SIZE: usize = 64 * 1024;
 
 //
 // Public API
@@ -166,25 +165,25 @@ impl Remote for SSH {
     // src: local full path of filename to upload
     // dst: remote full path of destination file to create or overwrite
     fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
-        let data = fs::read(src)?; // todo: read in chunks of SFTP_CHUNK_SIZE
         let perms = fs::metadata(src)?.permissions().mode();
-
-        let sfile = self
+        let mut buf = [0u8; SFTP_CHUNK_SIZE];
+        let rfile = self
             .sftp_session
             .open(dst, O_WRONLY | O_CREAT | O_TRUNC, perms)?;
-        //println!("upload {} -> {}", src, dst);
+        let mut lfile = fs::File::open(src)?;
 
-        for chunk in data.chunks(SFTP_CHUNK_SIZE) {
-            let ret = sfile.write(chunk);
+        loop {
+            let bytes_read = lfile.read(&mut buf)?;
+            if bytes_read == 0 { // done
+                break;
+            }
+            let ret = rfile.write(&buf[0..bytes_read]);
             if ret < 0 {
                 return Err(self.get_sftp_err(&format!("upload to {}", dst)));
             }
             let bytes_written = ret as usize;
-            if bytes_written != chunk.len() {
-                return Err(anyhow::anyhow!(
-                    "Short write: {bytes_written} / {}",
-                    chunk.len()
-                ));
+            if bytes_written != bytes_read {
+                return Err(anyhow::anyhow!("Short write: {bytes_written} / {bytes_read}"));
             }
         }
         Ok(())

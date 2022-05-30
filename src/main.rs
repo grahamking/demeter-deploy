@@ -1,10 +1,11 @@
 use core::arch::x86_64::_mm_crc32_u64;
 use std::collections::{HashMap, HashSet};
-//use std::env;
+use std::env;
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path;
 use std::process;
+use std::thread;
 
 use clap::arg;
 
@@ -12,7 +13,7 @@ mod ssh;
 use ssh::{MockSSH, Remote, SSH};
 
 const DESC: &str = r#"Example: rcple /home/graham/myfiles graham@myhost.com:/var/www/myfiles
-The format is intentionally the same as `rcp`."#;
+The format is intentionally the same as `scp`."#;
 
 const CRC32: u64 = 0xFFFFFFFF;
 const HELPER: &str = "/home/graham/src/rcple/asm/rcple-h";
@@ -31,10 +32,22 @@ fn main() -> Result<(), anyhow::Error> {
 
     // clap makes sure these two are populated, we don't need to check
     let mut src_dir = args.value_of("src_dir").unwrap().to_string();
-    let mut dst_dir = args.value_of("remote").unwrap().to_string();
+    let remote_str = args.value_of("remote").unwrap().to_string();
     if !src_dir.ends_with('/') {
         src_dir.push('/');
     }
+
+    // split remote string into username, hostname and path
+
+    let mut from_env = "".to_string();
+    let (username, remote_str) = remote_str.split_once('@').unwrap_or_else(|| {
+        from_env = env::var("USERNAME").expect("missing @ in remote part and $USERNAME not set");
+        (&from_env, &remote_str)
+    });
+    let (hostname, dst_dir) = remote_str
+        .split_once(':')
+        .expect("missing hostname (':' separator) in remote part");
+    let mut dst_dir = dst_dir.to_string();
     if !dst_dir.ends_with('/') {
         dst_dir.push('/');
     }
@@ -45,22 +58,19 @@ fn main() -> Result<(), anyhow::Error> {
         return Ok(());
     };
 
-    // local
+    // start local check in the background
 
-    let local = match checksum_dir(src_dir.clone().into()) {
-        Ok(c) => c,
-        Err(err) => {
-            eprintln!("Error on local dir {}: {}", src_dir, err);
-            process::exit(1);
-        }
-    };
+    let src_dir_for_local = src_dir.clone();
+    let local_thread = thread::Builder::new()
+        .name("local checksum".to_string())
+        .spawn(move || checksum_dir(src_dir_for_local.into()))?;
 
     // remote
 
     if verbose {
         println!("Using libssh {}", SSH::version());
     }
-    let real_ssh = SSH::new("localhost", "graham", ssh::LogLevel::WARNING)?;
+    let real_ssh = SSH::new(hostname, username, ssh::LogLevel::WARNING)?;
     let mut ssh: Box<dyn Remote> = Box::new(real_ssh);
 
     ssh.upload(HELPER, "/tmp/rcple-h")?;
@@ -74,6 +84,22 @@ fn main() -> Result<(), anyhow::Error> {
                 .map_or(("", 0), |(k, v)| (k, v.parse().unwrap()))
         })
         .collect();
+
+    // join local check
+
+    let local = match local_thread.join() {
+        Ok(checksum_dir_ret) => match checksum_dir_ret {
+            Ok(c) => c,
+            Err(err) => {
+                eprintln!("Error on local dir {}: {}", src_dir, err);
+                process::exit(1);
+            }
+        },
+        Err(err) => {
+            // thread panic
+            panic!("{:?}", err);
+        }
+    };
 
     // compare
 
@@ -198,16 +224,15 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
 }
 
 /* TODO
- - parse out username and host from remote. rename 'dst_dir'.
- - 'upload' should read files in SFTP_CHUNK_SIZE chunks, uploading
-    before reading next
+ - upload multiple files at once
+    try it
  - For all the SSHResult returns, if ERROR call ssh_get_error like on ssh_connect
     For sftp maybe call sftp_get_error
  - flag to skip dot (hidden) files (or to include them)
  - nice output showing
    - how many files done / remain
    - files uploading chunk by chunk
- - local and remote each in a thread
+ - remote in a thread?
  - rcpl-h (asm) if file > size crc in a thread (with max thread as num CPUs)
  - rcpl-h (asm) make it as small as possible
 */
