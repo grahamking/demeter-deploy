@@ -224,10 +224,11 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
 }
 
 /* TODO
- - upload multiple files at once
-    try it
- - For all the SSHResult returns, if ERROR call ssh_get_error like on ssh_connect
-    For sftp maybe call sftp_get_error
+ - a worker with n (cmd line flag, default 4) ssh connections. use crossbeam_channel
+    limit to n will be servers's /etc/ssh/sshd_config:MaxSessions which defaults to 10
+   do all mkdir in single thread
+   do upload on all connections for 4 file upload at once
+   also delete on multiple conns, although much less important
  - flag to skip dot (hidden) files (or to include them)
  - nice output showing
    - how many files done / remain

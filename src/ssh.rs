@@ -4,11 +4,11 @@
 
 use std::ffi::{CStr, CString};
 use std::fs;
+use std::io::Read;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::os::unix::fs::PermissionsExt;
-use std::io::Read;
 
-use anyhow::anyhow;
+use anyhow::bail;
 
 // These are in libc crate, but no dependencies is nice
 const O_WRONLY: c_uint = 1;
@@ -26,10 +26,10 @@ const SFTP_CHUNK_SIZE: usize = 64 * 1024;
 //
 
 pub trait Remote {
-    fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error>;
-    fn mkdir(&self, dir: &str, perms: u32) -> Result<(), anyhow::Error>;
-    fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error>;
-    fn delete(&self, path: &str) -> Result<(), anyhow::Error>;
+    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<String>;
+    fn mkdir(&self, dir: &str, perms: u32) -> anyhow::Result<()>;
+    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()>;
+    fn delete(&self, path: &str) -> anyhow::Result<()>;
 }
 
 pub struct SSH {
@@ -47,40 +47,38 @@ impl SSH {
     }
 
     // connect and authenticate
-    pub fn new(host: &str, username: &str, log_level: LogLevel) -> Result<SSH, anyhow::Error> {
-        let host = CString::new(host).unwrap();
-        let username = CString::new(username).unwrap();
+    pub fn new(host: &str, username: &str, log_level: LogLevel) -> anyhow::Result<SSH> {
+        let host = CString::new(host)?;
+        let username = CString::new(username)?;
 
-        unsafe { ssh_set_log_level(log_level) };
+        let ret = unsafe { ssh_set_log_level(log_level) };
+        if !matches!(ret, SSHResult::OK) {
+            bail!("set_log_level error");
+        }
+
         let session = unsafe { ssh_new() };
         if session.is_null() {
-            return Err(anyhow!("ssh_new retuned null"));
+            bail!("ssh_new retuned null");
         }
         unsafe {
             ssh_options_set(session, SSHOption::HOST, host.as_ptr() as *const c_void);
             ssh_options_set(session, SSHOption::PORT, &22 as *const _ as _);
         }
         let connect_ret = unsafe { ssh_connect(session) };
-        if matches!(connect_ret, SSHResult::ERROR) {
+        if !matches!(connect_ret, SSHResult::OK) {
             let err_msg = unsafe { CStr::from_ptr(ssh_get_error(session)) };
-            return Err(anyhow!("Connect ERR: {}", err_msg.to_string_lossy()));
+            bail!("Connect ERR: {}", err_msg.to_string_lossy());
         }
 
         let is_know = unsafe { ssh_session_is_known_server(session) };
         if !matches!(is_know, SSHKnownHostsResult::HOSTS_OK) {
-            return Err(anyhow!(
-                "Unknown host: {is_know:?}. ssh to it manually first to accept key"
-            ));
+            bail!("Unknown host: {is_know:?}. ssh to it manually first to accept key");
         }
 
-        unsafe {
-            let auth_ret = ssh_userauth_agent(session, username.as_ptr());
-            if !matches!(auth_ret, SSHAuthResult::SUCCESS) {
-                return Err(anyhow!(
-                    "auth err or incomplete: {auth_ret:?}. Is ssh-agent running?"
-                ));
-            }
-        };
+        let auth_ret = unsafe { ssh_userauth_agent(session, username.as_ptr()) };
+        if !matches!(auth_ret, SSHAuthResult::SUCCESS) {
+            bail!("auth err or incomplete: {auth_ret:?}. Is ssh-agent running?");
+        }
 
         let sftp_session = SSH::create_sftp(session)?;
         Ok(SSH {
@@ -89,12 +87,16 @@ impl SSH {
         })
     }
 
-    fn create_sftp(session: *mut c_void) -> Result<SFTP, anyhow::Error> {
+    fn create_sftp(session: *mut c_void) -> anyhow::Result<SFTP> {
         let sftp_session = unsafe { sftp_new(session) };
-        let sftp_init_ret = unsafe { sftp_init(sftp_session) };
-        if matches!(sftp_init_ret, SSHResult::ERROR) {
+        if sftp_session.is_null() {
             let err_msg = unsafe { CStr::from_ptr(ssh_get_error(session)) };
-            return Err(anyhow!("SFTP init ERR: {}", err_msg.to_string_lossy()));
+            bail!("SFTP new ERR: {}", err_msg.to_string_lossy());
+        }
+        let sftp_init_ret = unsafe { sftp_init(sftp_session) };
+        if !matches!(sftp_init_ret, SSHResult::OK) {
+            let err_msg = unsafe { CStr::from_ptr(ssh_get_error(session)) };
+            bail!("SFTP init ERR: {}", err_msg.to_string_lossy());
         }
         Ok(SFTP {
             session: sftp_session,
@@ -108,7 +110,7 @@ impl SSH {
     fn get_sftp_err(&self, msg: &str) -> anyhow::Error {
         let ssh_err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
         let sftp_err_num = unsafe { sftp_get_error(self.sftp_session.session) };
-        anyhow!(
+        anyhow::anyhow!(
             "{}: {}. SFTP err num: {:?}.",
             msg,
             ssh_err_msg.to_string_lossy(),
@@ -118,29 +120,34 @@ impl SSH {
 }
 
 impl Remote for SSH {
-    fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error> {
+    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<String> {
         let channel = unsafe { ssh_channel_new(self.session.0) };
         if channel.is_null() {
-            return Err(anyhow!("channel is null"));
+            bail!("channel is null");
         }
         let ses_ret = unsafe { ssh_channel_open_session(channel) };
-        if matches!(ses_ret, SSHResult::ERROR) {
-            return Err(anyhow!(
-                "ssh_channel_open_session err - increase log level and re-run"
-            ));
+        if !matches!(ses_ret, SSHResult::OK) {
+            let err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
+            bail!(
+                "ssh_channel_open_session err: {}",
+                err_msg.to_string_lossy()
+            );
         }
         let ls_command = CString::new(cmd).unwrap();
         let rc = unsafe { ssh_channel_request_exec(channel, ls_command.as_ptr()) };
-        if matches!(rc, SSHResult::ERROR) {
-            return Err(anyhow!(
-                "ssh_channel_request_exec err - increase log level and re-un"
-            ));
+        if !matches!(rc, SSHResult::OK) {
+            let err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
+            bail!("ssh_channel_request_exec err {}", err_msg.to_string_lossy());
         }
 
         let mut output = String::new();
         let mut buffer = Vec::with_capacity(SSH_CMD_BUF_SIZE);
         let mut nbytes =
             unsafe { ssh_channel_read(channel, buffer.as_mut_ptr(), buffer.capacity() as u32, 0) };
+        if nbytes < 0 {
+            let err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
+            bail!("ssh_channel_read err {}", err_msg.to_string_lossy());
+        }
         while nbytes > 0 {
             unsafe { buffer.set_len(nbytes as usize) };
             output += &String::from_utf8_lossy(&buffer);
@@ -164,7 +171,7 @@ impl Remote for SSH {
     //
     // src: local full path of filename to upload
     // dst: remote full path of destination file to create or overwrite
-    fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
+    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
         let perms = fs::metadata(src)?.permissions().mode();
         let mut buf = [0u8; SFTP_CHUNK_SIZE];
         let rfile = self
@@ -174,7 +181,8 @@ impl Remote for SSH {
 
         loop {
             let bytes_read = lfile.read(&mut buf)?;
-            if bytes_read == 0 { // done
+            if bytes_read == 0 {
+                // done
                 break;
             }
             let ret = rfile.write(&buf[0..bytes_read]);
@@ -183,35 +191,35 @@ impl Remote for SSH {
             }
             let bytes_written = ret as usize;
             if bytes_written != bytes_read {
-                return Err(anyhow::anyhow!("Short write: {bytes_written} / {bytes_read}"));
+                bail!("Short write: {bytes_written} / {bytes_read}");
             }
         }
         Ok(())
     }
 
     // make remote directory
-    fn mkdir(&self, dir: &str, perms: u32) -> Result<(), anyhow::Error> {
+    fn mkdir(&self, dir: &str, perms: u32) -> anyhow::Result<()> {
         let c_dir = CString::new(dir)?;
         let ret = unsafe { sftp_mkdir(self.sftp_session.session, c_dir.as_ptr(), perms) };
-        if matches!(ret, SSHResult::ERROR) {
+        if !matches!(ret, SSHResult::OK) {
             let sftp_err_num = unsafe { sftp_get_error(self.sftp_session.session) };
             if sftp_err_num != SFTPError::SSH_FX_FILE_ALREADY_EXISTS {
                 let ssh_err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
-                return Err(anyhow!(
+                bail!(
                     "mkdir: {}. SFTP err num: {:?}.",
                     ssh_err_msg.to_string_lossy(),
                     sftp_err_num
-                ));
+                );
             }
         }
         Ok(())
     }
 
     // delete a remote file
-    fn delete(&self, path: &str) -> Result<(), anyhow::Error> {
+    fn delete(&self, path: &str) -> anyhow::Result<()> {
         let c_path = CString::new(path)?;
         let ret = unsafe { sftp_unlink(self.sftp_session.session, c_path.as_ptr()) };
-        if matches!(ret, SSHResult::ERROR) {
+        if !matches!(ret, SSHResult::OK) {
             return Err(self.get_sftp_err(&format!("delete {}", path)));
         }
         Ok(())
@@ -235,11 +243,11 @@ pub struct SFTP {
 }
 
 impl SFTP {
-    pub fn open(&self, filename: &str, mode: u32, perms: u32) -> Result<SFTPFile, anyhow::Error> {
+    pub fn open(&self, filename: &str, mode: u32, perms: u32) -> anyhow::Result<SFTPFile> {
         let remote_filename = CString::new(filename).unwrap();
         let handle = unsafe { sftp_open(self.session, remote_filename.as_ptr(), mode, perms) };
         if handle.is_null() {
-            return Err(anyhow::anyhow!("sftp_open remote {filename}"));
+            bail!("sftp_open remote {filename}");
         }
         Ok(SFTPFile { handle })
     }
@@ -267,7 +275,7 @@ impl SFTPFile {
 impl Drop for SFTPFile {
     fn drop(&mut self) {
         let sftp_close_ret = unsafe { sftp_close(self.handle) };
-        if matches!(sftp_close_ret, SSHResult::ERROR) {
+        if !matches!(sftp_close_ret, SSHResult::OK) {
             eprintln!("sftp_close err");
         }
     }
@@ -285,19 +293,19 @@ pub enum LogLevel {
 pub struct MockSSH {}
 
 impl Remote for MockSSH {
-    fn run_remote_cmd(&self, cmd: &str) -> Result<String, anyhow::Error> {
+    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<String> {
         println!("would run cmd '{cmd}'");
         Ok("".to_string())
     }
-    fn mkdir(&self, dir: &str, perms: u32) -> Result<(), anyhow::Error> {
-        println!("would mkdir {dir} with perms {perms:o}");
+    fn mkdir(&self, dir: &str, perms: u32) -> anyhow::Result<()> {
+        println!("would mkdir {dir} with perms {perms:o}"); // :o is octal
         Ok(())
     }
-    fn upload(&self, src: &str, dst: &str) -> Result<(), anyhow::Error> {
+    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
         println!("would upload {src} -> {dst}");
         Ok(())
     }
-    fn delete(&self, path: &str) -> Result<(), anyhow::Error> {
+    fn delete(&self, path: &str) -> anyhow::Result<()> {
         println!("would delete {path}");
         Ok(())
     }
@@ -411,7 +419,7 @@ enum SSHAuthResult {
 #[link(name = "ssh")]
 extern "C" {
     fn ssh_version(min: c_uint) -> *const c_char;
-    fn ssh_set_log_level(level: LogLevel) -> c_int;
+    fn ssh_set_log_level(level: LogLevel) -> SSHResult;
     fn ssh_options_set(s: SSHSession, opt_type: SSHOption, value: *const c_void) -> c_int;
 
     fn ssh_new() -> SSHSession;
