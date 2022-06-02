@@ -10,6 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::bail;
 
+use crate::remote::Remote;
+
 // These are in libc crate, but no dependencies is nice
 const O_WRONLY: c_uint = 1;
 const O_CREAT: c_uint = 0o100;
@@ -24,13 +26,6 @@ const SFTP_CHUNK_SIZE: usize = 64 * 1024;
 // Public API
 // Start with: SSH::new
 //
-
-pub trait Remote {
-    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<String>;
-    fn mkdir(&self, dir: &str, perms: u32) -> anyhow::Result<()>;
-    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()>;
-    fn delete(&self, path: &str) -> anyhow::Result<()>;
-}
 
 pub struct SSH {
     sftp_session: SFTP, // comes first because must be dropped before 'session'
@@ -281,6 +276,7 @@ impl Drop for SFTPFile {
     }
 }
 
+#[derive(Clone, Copy)]
 #[repr(i32)]
 pub enum LogLevel {
     NOLOG = 0, // No logging at all

@@ -9,8 +9,14 @@ use std::thread;
 
 use clap::arg;
 
+mod ssh_manager;
+use ssh_manager::SSHManager;
+
 mod ssh;
-use ssh::{MockSSH, Remote, SSH};
+use ssh::SSH;
+
+mod remote;
+use remote::Remote;
 
 const DESC: &str = r#"Example: rcple /home/graham/myfiles graham@myhost.com:/var/www/myfiles
 The format is intentionally the same as `scp`."#;
@@ -70,8 +76,7 @@ fn main() -> Result<(), anyhow::Error> {
     if verbose {
         println!("Using libssh {}", SSH::version());
     }
-    let real_ssh = SSH::new(hostname, username, ssh::LogLevel::WARNING)?;
-    let mut ssh: Box<dyn Remote> = Box::new(real_ssh);
+    let mut ssh = SSHManager::new(hostname, username, ssh::LogLevel::WARNING)?;
 
     ssh.upload(HELPER, "/tmp/rcple-h")?;
 
@@ -135,7 +140,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     if is_dry_run {
-        ssh = Box::new(MockSSH {});
+        ssh = ssh.switch_to_dry_run();
     }
 
     // action
@@ -169,6 +174,8 @@ fn main() -> Result<(), anyhow::Error> {
     for filename in delete {
         ssh.delete(&format!("{dst_dir}{}", filename))?;
     }
+
+    ssh.wait_for_done();
 
     Ok(())
 }
