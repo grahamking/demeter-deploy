@@ -29,12 +29,14 @@ fn main() -> Result<(), anyhow::Error> {
         .about(DESC)
         .arg(arg!(-v --verbose "Debug level output").required(false))
         .arg(arg!(-d --"dry-run" "Show what we would do without doing it").required(false))
+        .arg(arg!(-H --hidden "Include hidden (dot) files").required(false))
         .arg(arg!([src_dir] "Local directory to copy from").required(true))
         .arg(arg!([remote] "Remote to copy to in format user@host:/dir/").required(true))
         .get_matches();
 
     let verbose = args.is_present("verbose");
     let is_dry_run = args.is_present("dry-run");
+    let is_include_hidden = args.is_present("hidden");
 
     // clap makes sure these two are populated, we don't need to check
     let mut src_dir = args.value_of("src_dir").unwrap().to_string();
@@ -61,7 +63,7 @@ fn main() -> Result<(), anyhow::Error> {
     // check we have the helper binary
     if !path::Path::new(HELPER).exists() {
         eprintln!("Helper binary '{}' not found.", HELPER);
-        return Ok(());
+        process::exit(1);
     };
 
     // start local check in the background
@@ -69,14 +71,20 @@ fn main() -> Result<(), anyhow::Error> {
     let src_dir_for_local = src_dir.clone();
     let local_thread = thread::Builder::new()
         .name("local checksum".to_string())
-        .spawn(move || checksum_dir(src_dir_for_local.into()))?;
+        .spawn(move || checksum_dir(src_dir_for_local.into(), is_include_hidden))?;
 
     // remote
 
     if verbose {
         println!("Using libssh {}", SSH::version());
     }
-    let mut ssh = SSHManager::new(hostname, username, ssh::LogLevel::WARNING)?;
+    let mut ssh = match SSHManager::new(hostname, username, ssh::LogLevel::NOLOG) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("Could not ssh to '{username}@{hostname}': {err}");
+            process::exit(1);
+        }
+    };
 
     ssh.upload(HELPER, "/tmp/rcple-h")?;
 
@@ -88,6 +96,7 @@ fn main() -> Result<(), anyhow::Error> {
             l.split_once(':')
                 .map_or(("", 0), |(k, v)| (k, v.parse().unwrap()))
         })
+        .filter(|(name, _)| is_include_hidden || !name.starts_with("."))
         .collect();
 
     // join local check
@@ -180,7 +189,10 @@ fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Error> {
+fn checksum_dir(
+    path: path::PathBuf,
+    is_include_hidden: bool,
+) -> Result<HashMap<String, u32>, anyhow::Error> {
     let path_len = path.to_string_lossy().len();
     let mut out = HashMap::with_capacity(64);
     let mut dirs = vec![path];
@@ -190,7 +202,7 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
         for entry in fs::read_dir(next_dir)? {
             let file = entry?;
             let filename = file.file_name().to_string_lossy().into_owned();
-            if filename.starts_with('.') {
+            if filename.starts_with('.') && !is_include_hidden {
                 continue;
             }
             let file_type = file.file_type()?;
@@ -236,10 +248,45 @@ fn checksum_dir(path: path::PathBuf) -> Result<HashMap<String, u32>, anyhow::Err
    do all mkdir in single thread
    do upload on all connections for 4 file upload at once
    also delete on multiple conns, although much less important
- - flag to skip dot (hidden) files (or to include them)
- - nice output showing
-   - how many files done / remain
-   - files uploading chunk by chunk
+ - nice output:
+
+   (x/total): filename \align-right size/s | size \t time-taken
+    eg:
+    (152/178): urw-base35-fonts-20200910-11.fc35.noarch.rpm              75 kB/s |  10 kB     00:01
+        at the bottom same thing but with live progress bar (but how to do with N threads?)
+
+    cargo does :
+
+        Compiling git2-curl v0.15.0
+        Compiling cargo v0.64.0 (/home/graham/src/cargo)
+        Building [=======================> ] 166/168: cargo, othercrate, etcrate
+
+        only the last line ("Building ..." changes)
+
+        and then
+        Finished dev [unoptimized + debuginfo] target(s) in 44.71s
+
+    We only need to update the last line from cursor to end, using EL ANSI command: b"\x1B[K"
+    For color use crate termcolor or direct ANSI
+
+    Get terminal width:
+
+    pub fn stderr_width() -> TtyWidth {
+        unsafe {
+            let mut winsize: libc::winsize = mem::zeroed();
+            // The .into() here is needed for FreeBSD which defines TIOCGWINSZ
+            // as c_uint but ioctl wants c_ulong.
+            if libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ.into(), &mut winsize) < 0 {
+                return TtyWidth::NoTty;
+            }
+            if winsize.ws_col > 0 {
+                TtyWidth::Known(winsize.ws_col as usize)
+            } else {
+                TtyWidth::NoTty
+            }
+        }
+    }
+
  - remote in a thread?
  - rcpl-h (asm) if file > size crc in a thread (with max thread as num CPUs)
  - rcpl-h (asm) make it as small as possible
