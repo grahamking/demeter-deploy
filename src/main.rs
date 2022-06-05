@@ -30,10 +30,16 @@ fn main() -> Result<(), anyhow::Error> {
         .arg(arg!(-v --verbose "Debug level output").required(false))
         .arg(arg!(-d --"dry-run" "Show what we would do without doing it").required(false))
         .arg(arg!(-H --hidden "Include hidden (dot) files").required(false))
+        .arg(
+            arg!(-w --workers "Number of concurrent SSH connections")
+                .required(false)
+                .default_value("4"),
+        )
         .arg(arg!([src_dir] "Local directory to copy from").required(true))
         .arg(arg!([remote] "Remote to copy to in format user@host:/dir/").required(true))
         .get_matches();
 
+    let num_workers: usize = args.value_of("workers").unwrap().parse()?;
     let verbose = args.is_present("verbose");
     let is_dry_run = args.is_present("dry-run");
     let is_include_hidden = args.is_present("hidden");
@@ -78,7 +84,7 @@ fn main() -> Result<(), anyhow::Error> {
     if verbose {
         println!("Using libssh {}", SSH::version());
     }
-    let mut ssh = match SSHManager::new(hostname, username, ssh::LogLevel::NOLOG) {
+    let mut ssh = match SSHManager::new(hostname, username, ssh::LogLevel::NOLOG, num_workers) {
         Ok(s) => s,
         Err(err) => {
             eprintln!("Could not ssh to '{username}@{hostname}': {err}");
@@ -243,11 +249,7 @@ fn checksum_dir(
 }
 
 /* TODO
- - a worker with n (cmd line flag, default 4) ssh connections. use crossbeam_channel
-    limit to n will be servers's /etc/ssh/sshd_config:MaxSessions which defaults to 10
-   do all mkdir in single thread
-   do upload on all connections for 4 file upload at once
-   also delete on multiple conns, although much less important
+ - also delete on multiple conns?
  - nice output:
 
    (x/total): filename \align-right size/s | size \t time-taken

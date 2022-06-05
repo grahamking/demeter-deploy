@@ -4,8 +4,6 @@ use crossbeam_channel::{unbounded, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-const NUM_UPLOAD_WORKERS: usize = 4;
-
 pub struct SSHManager {
     primary: Box<dyn Remote>,
     upload_sender: Option<Sender<(String, String)>>,
@@ -13,17 +11,23 @@ pub struct SSHManager {
 }
 
 impl SSHManager {
-    pub fn new(host: &str, username: &str, log_level: LogLevel) -> anyhow::Result<SSHManager> {
+    pub fn new(
+        host: &str,
+        username: &str,
+        log_level: LogLevel,
+        num_workers: usize,
+    ) -> anyhow::Result<SSHManager> {
         let primary = SSH::new(host, username, log_level)?;
         let (upload_sender, upload_receiver) = unbounded::<(String, String)>();
-        let mut upload_workers = Vec::with_capacity(NUM_UPLOAD_WORKERS);
+        let mut upload_workers = Vec::with_capacity(num_workers);
 
         // one ssh at a time
         let ssh_lock = Arc::new(Mutex::new(()));
 
+        // start upload workers
         let host = host.to_string();
         let username = username.to_string();
-        for tid in 1..=NUM_UPLOAD_WORKERS {
+        for tid in 1..=num_workers {
             let host = host.clone();
             let username = username.clone();
             let upload_receiver = upload_receiver.clone();
