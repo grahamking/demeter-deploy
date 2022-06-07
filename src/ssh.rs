@@ -7,6 +7,8 @@ use std::fs;
 use std::io::Read;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::os::unix::fs::PermissionsExt;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::bail;
 
@@ -115,7 +117,7 @@ impl SSH {
 }
 
 impl Remote for SSH {
-    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<String> {
+    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<(String, i32)> {
         let channel = unsafe { ssh_channel_new(self.session.0) };
         if channel.is_null() {
             bail!("channel is null");
@@ -128,8 +130,8 @@ impl Remote for SSH {
                 err_msg.to_string_lossy()
             );
         }
-        let ls_command = CString::new(cmd).unwrap();
-        let rc = unsafe { ssh_channel_request_exec(channel, ls_command.as_ptr()) };
+        let cmd_c = CString::new(cmd).unwrap();
+        let rc = unsafe { ssh_channel_request_exec(channel, cmd_c.as_ptr()) };
         if !matches!(rc, SSHResult::OK) {
             let err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
             bail!("ssh_channel_request_exec err {}", err_msg.to_string_lossy());
@@ -137,8 +139,10 @@ impl Remote for SSH {
 
         let mut output = String::new();
         let mut buffer = Vec::with_capacity(SSH_CMD_BUF_SIZE);
+        // if there is a remote error this read closes the channel
         let mut nbytes =
             unsafe { ssh_channel_read(channel, buffer.as_mut_ptr(), buffer.capacity() as u32, 0) };
+
         if nbytes < 0 {
             let err_msg = unsafe { CStr::from_ptr(ssh_get_error(self.session.0)) };
             bail!("ssh_channel_read err {}", err_msg.to_string_lossy());
@@ -153,13 +157,21 @@ impl Remote for SSH {
             };
         }
 
-        unsafe {
+        let exit_status = unsafe {
             ssh_channel_send_eof(channel);
             ssh_channel_close(channel);
+            // wait for remote to close
+            while ssh_channel_is_closed(channel) != 1 {
+                thread::sleep(Duration::from_millis(50));
+            }
+            // this will only be the exit status of a progam that exit cleanly
+            // otherwise it's -1
+            let es = ssh_channel_get_exit_status(channel);
             ssh_channel_free(channel);
-        }
+            es as i32
+        };
 
-        Ok(output)
+        Ok((output, exit_status))
     }
 
     // Upload a local file to remote
@@ -289,9 +301,9 @@ pub enum LogLevel {
 pub struct MockSSH {}
 
 impl Remote for MockSSH {
-    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<String> {
+    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<(String, i32)> {
         println!("would run cmd '{cmd}'");
-        Ok("".to_string())
+        Ok(("".to_string(), 0))
     }
     fn mkdir(&self, dir: &str, perms: u32) -> anyhow::Result<()> {
         println!("would mkdir {dir} with perms {perms:o}"); // :o is octal
@@ -436,6 +448,8 @@ extern "C" {
     fn ssh_channel_read(c: SSHChannel, dest: *mut u8, count: u32, is_stderr: c_uint) -> c_int;
     fn ssh_channel_send_eof(c: SSHChannel);
     fn ssh_channel_close(c: SSHChannel);
+    fn ssh_channel_is_closed(c: SSHChannel) -> c_int;
+    fn ssh_channel_get_exit_status(c: SSHChannel) -> c_int;
 
     fn sftp_new(s: SSHSession) -> SFTPSession;
     fn sftp_free(sftp: SFTPSession);

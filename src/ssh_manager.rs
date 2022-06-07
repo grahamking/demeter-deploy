@@ -52,9 +52,15 @@ impl SSHManager {
         })
     }
 
+    // Upload using the primary connection, not the thread pool.
+    // This makes upload blocking.
+    pub fn upload_primary(&self, src: &str, dst: &str) -> anyhow::Result<()> {
+        self.primary.upload(src, dst)
+    }
+
     // Replaces self with a mocked SSH connection, so we can report what would really happen
     pub fn switch_to_dry_run(self) -> Self {
-        self.wait_for_done();
+        self.stop();
         SSHManager {
             primary: Box::new(MockSSH {}),
             upload_sender: None,
@@ -63,7 +69,7 @@ impl SSHManager {
     }
 
     // wait until all upload workers are done
-    pub fn wait_for_done(mut self) {
+    pub fn stop(mut self) {
         drop(self.upload_sender.take());
         for thread_handle in self.upload_workers {
             thread_handle.join().unwrap();
@@ -72,7 +78,7 @@ impl SSHManager {
 }
 
 impl Remote for SSHManager {
-    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<String> {
+    fn run_remote_cmd(&self, cmd: &str) -> anyhow::Result<(String, i32)> {
         self.primary.run_remote_cmd(cmd)
     }
 
@@ -84,6 +90,9 @@ impl Remote for SSHManager {
         self.primary.delete(path)
     }
 
+    // upload a file to remote.
+    // queues for upload and returns immediately.
+    // call stop() once all the uploads are queued to wait for completion.
     fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
         match &self.upload_sender {
             // normal multi-threaded mode

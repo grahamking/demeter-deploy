@@ -22,18 +22,25 @@ const DESC: &str = r#"Example: rcple /home/graham/myfiles graham@myhost.com:/var
 The format is intentionally the same as `scp`."#;
 
 const CRC32: u64 = 0xFFFFFFFF;
-const HELPER: &str = "/home/graham/src/rcple/asm/rcple-h";
+const HELPER_SRC: &str = "/home/graham/src/rcple/asm/rcple-h";
+const HELPER_SEP: char = ':';
+const DEFAULT_HELPER_DST: &str = "/tmp/rcple-h";
 
 fn main() -> Result<(), anyhow::Error> {
     let args = clap::Command::new("rcple src_dir user@host:remote_dst_dir")
         .about(DESC)
+        .arg(arg!(--"dry-run" "Show what we would do without doing it").required(false))
         .arg(arg!(-v --verbose "Debug level output").required(false))
-        .arg(arg!(-d --"dry-run" "Show what we would do without doing it").required(false))
         .arg(arg!(-H --hidden "Include hidden (dot) files").required(false))
         .arg(
             arg!(-w --workers "Number of concurrent SSH connections")
                 .required(false)
                 .default_value("4"),
+        )
+        .arg(
+            arg!(--"helper-dst" "Full path to upload remote helper binary to")
+                .required(false)
+                .default_value(DEFAULT_HELPER_DST),
         )
         .arg(arg!([src_dir] "Local directory to copy from").required(true))
         .arg(arg!([remote] "Remote to copy to in format user@host:/dir/").required(true))
@@ -43,6 +50,7 @@ fn main() -> Result<(), anyhow::Error> {
     let verbose = args.is_present("verbose");
     let is_dry_run = args.is_present("dry-run");
     let is_include_hidden = args.is_present("hidden");
+    let helper_dst = args.value_of("helper-dst").unwrap();
 
     // clap makes sure these two are populated, we don't need to check
     let mut src_dir = args.value_of("src_dir").unwrap().to_string();
@@ -67,8 +75,8 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     // check we have the helper binary
-    if !path::Path::new(HELPER).exists() {
-        eprintln!("Helper binary '{}' not found.", HELPER);
+    if !path::Path::new(HELPER_SRC).exists() {
+        eprintln!("Helper binary '{}' not found.", HELPER_SRC);
         process::exit(1);
     };
 
@@ -92,14 +100,38 @@ fn main() -> Result<(), anyhow::Error> {
         }
     };
 
-    ssh.upload(HELPER, "/tmp/rcple-h")?;
+    ssh.upload_primary(HELPER_SRC, helper_dst)?;
 
-    let output = ssh.run_remote_cmd(&format!("/tmp/rcple-h {}", dst_dir))?;
+    let remote_cmd = &format!("{helper_dst} {dst_dir}");
+    let (output, exit_status) = ssh.run_remote_cmd(remote_cmd)?;
+    match exit_status {
+        0 => {} // success
+        x if x < 0 => {
+            eprintln!(
+                "run_remote_cmd error: {x}. Try 'ssh {username}@{hostname}' and run '{remote_cmd}'"
+            );
+            process::exit(2);
+        }
+        x if x > 0 => {
+            eprintln!("Remote helper exit code {x}");
+            process::exit(x);
+        }
+        _ => unreachable!(),
+    }
+
+    let first_line = output
+        .lines()
+        .next()
+        .expect("No response from remote or empty directory");
+    if !first_line.contains(HELPER_SEP) {
+        eprintln!("Remote helper error: {output}");
+        process::exit(2);
+    }
 
     let remote: HashMap<&str, u32> = output
         .lines()
         .map(|l| {
-            l.split_once(':')
+            l.split_once(HELPER_SEP)
                 .map_or(("", 0), |(k, v)| (k, v.parse().unwrap()))
         })
         .filter(|(name, _)| is_include_hidden || !name.starts_with("."))
@@ -190,7 +222,7 @@ fn main() -> Result<(), anyhow::Error> {
         ssh.delete(&format!("{dst_dir}{}", filename))?;
     }
 
-    ssh.wait_for_done();
+    ssh.stop();
 
     Ok(())
 }
@@ -249,8 +281,12 @@ fn checksum_dir(
 }
 
 /* TODO
+ - cpuid for whatever that illegal instruction is
+
  - also delete on multiple conns?
  - nice output:
+
+   see rtest/src/bin/console.rs
 
    (x/total): filename \align-right size/s | size \t time-taken
     eg:
