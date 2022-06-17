@@ -68,6 +68,7 @@ section .data align=16
 
 ; error messages
 
+	EM_AVX2: db "Need AVX2",10,0
 	EM_OPEN_FILE: db "file open error for CRCing: ",0
 	EM_OPEN_DIR: db "dir open error for listing: ",0
 	EM_FSTAT: db "fstat error: ",0
@@ -163,6 +164,14 @@ global _start
 ;; most of the code is here
 ;;
 _start:
+	; Modern instructions we need: pcmpistri (SSE4_2), vmovdqa (AVX), vpxor (AVX2)
+	; cpuid: check for AVX2 (which implies AVX and SSE4.2)
+	mov eax, 7
+	mov ecx, 0
+	cpuid
+	shr ebx, 5
+	and ebx, 1
+	jz missing_avx2
 
 	; number of cmd line arguments is at rsp
 	; we want exactly 2, program name, and a directory
@@ -192,8 +201,8 @@ _start:
 	; zero the registers we use to clear path_ptr
 	; those are either not modified during the program or reset (xmm0 in strlen)
 	; so safe to do just once
-	vpxord zmm0, zmm0, zmm0
-	vpxord zmm3, zmm3, zmm3
+	vpxor ymm0, ymm0, ymm0
+	vpxor ymm3, ymm3, ymm3
 
 	; start in current directory
 	xor eax, eax
@@ -329,11 +338,15 @@ process_single:
 	; it's a file
 .crc_file:
 
-	; zero path memory using AVX-512 instructions
-	vmovdqa64 [path_ptr], zmm0
-	vmovdqa64 [path_ptr+64], zmm3
-	vmovdqa64 [path_ptr+128], zmm0
-	vmovdqa64 [path_ptr+192], zmm3
+	; zero path memory using AVX instructions
+	vmovdqa [path_ptr], ymm0
+	vmovdqa [path_ptr+32], ymm3
+	vmovdqa [path_ptr+64], ymm0
+	vmovdqa [path_ptr+96], ymm3
+	vmovdqa [path_ptr+128], ymm0
+	vmovdqa [path_ptr+160], ymm3
+	vmovdqa [path_ptr+192], ymm0
+	vmovdqa [path_ptr+224], ymm3
 
 	; copy dir path
 
@@ -765,6 +778,19 @@ missing_slash_err:
 	call print
 
 	mov edi, 1  ; return code
+	mov eax, SYS_EXIT
+	syscall
+
+;; print missing AVX2 message and exit, that means very old CPU on the server
+;; don't use strlen for printing because that needs sse4.2
+missing_avx2:
+	mov rsi, EM_AVX2
+	mov edx, 10 ; length of EM_AVX2
+	mov rdi, STDERR
+	mov eax, SYS_WRITE
+	syscall
+
+	mov edi, 2  ; return code
 	mov eax, SYS_EXIT
 	syscall
 
