@@ -2,3 +2,5 @@
 /asm/test
 /asm/rcple-h
 /asm/main.o
+/asm/main-dbg.o
+/asm/rcple-dbg
