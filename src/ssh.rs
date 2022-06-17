@@ -11,7 +11,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::bail;
+use crossbeam_channel::Sender;
 
+use crate::progress_message::Progress;
 use crate::remote::Remote;
 
 // These are in libc crate, but no dependencies is nice
@@ -32,6 +34,7 @@ const SFTP_CHUNK_SIZE: usize = 64 * 1024;
 pub struct SSH {
     sftp_session: SFTP, // comes first because must be dropped before 'session'
     session: SSHSessionWrap,
+    progress: Sender<Progress>,
 }
 
 impl SSH {
@@ -44,7 +47,12 @@ impl SSH {
     }
 
     // connect and authenticate
-    pub fn new(host: &str, username: &str, log_level: LogLevel) -> anyhow::Result<SSH> {
+    pub fn new(
+        host: &str,
+        username: &str,
+        log_level: LogLevel,
+        progress: Sender<Progress>,
+    ) -> anyhow::Result<SSH> {
         let host = CString::new(host)?;
         let username = CString::new(username)?;
 
@@ -81,6 +89,7 @@ impl SSH {
         Ok(SSH {
             session: SSHSessionWrap(session),
             sftp_session,
+            progress,
         })
     }
 
@@ -178,14 +187,17 @@ impl Remote for SSH {
     //
     // src: local full path of filename to upload
     // dst: remote full path of destination file to create or overwrite
-    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
-        let perms = fs::metadata(src)?.permissions().mode();
+    // with_progress: true to send progress reports on chanell
+    fn upload(&self, src: &str, dst: &str, with_progress: bool) -> anyhow::Result<()> {
+        let stat = fs::metadata(src)?;
+        let perms = stat.permissions().mode();
         let mut buf = [0u8; SFTP_CHUNK_SIZE];
         let rfile = self
             .sftp_session
             .open(dst, O_WRONLY | O_CREAT | O_TRUNC, perms)?;
         let mut lfile = fs::File::open(src)?;
 
+        let mut total_bytes = 0;
         loop {
             let bytes_read = lfile.read(&mut buf)?;
             if bytes_read == 0 {
@@ -200,6 +212,24 @@ impl Remote for SSH {
             if bytes_written != bytes_read {
                 bail!("Short write: {bytes_written} / {bytes_read}");
             }
+            total_bytes += bytes_written;
+            if with_progress {
+                let _ = self.progress.send(Progress::Part(bytes_written));
+            }
+        }
+        if total_bytes != stat.len() as usize {
+            eprintln!(
+                "ERR uploading {}->{}. Local is {} bytes, uploaded {} bytes.",
+                src,
+                dst,
+                stat.len(),
+                total_bytes
+            );
+        }
+        if with_progress {
+            let _ = self
+                .progress
+                .send(Progress::Complete(src.to_string(), total_bytes));
         }
         Ok(())
     }
@@ -309,7 +339,7 @@ impl Remote for MockSSH {
         println!("would mkdir {dir} with perms {perms:o}"); // :o is octal
         Ok(())
     }
-    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
+    fn upload(&self, src: &str, dst: &str, _: bool) -> anyhow::Result<()> {
         println!("would upload {src} -> {dst}");
         Ok(())
     }

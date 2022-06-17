@@ -6,8 +6,10 @@ use std::io::{BufReader, Read};
 use std::path;
 use std::process;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use clap::arg;
+use crossbeam_channel::unbounded;
 
 mod ssh_manager;
 use ssh_manager::SSHManager;
@@ -17,6 +19,12 @@ use ssh::SSH;
 
 mod remote;
 use remote::Remote;
+
+mod progress_message;
+use progress_message::Progress;
+
+mod output;
+use output::run_output;
 
 const DESC: &str = r#"Example: rcple /home/graham/myfiles graham@myhost.com:/var/www/myfiles
 The format is intentionally the same as `scp`."#;
@@ -80,6 +88,8 @@ fn main() -> Result<(), anyhow::Error> {
         process::exit(1);
     };
 
+    let (progress_sender, progress_receiver) = unbounded::<Progress>();
+
     // start local check in the background
 
     let src_dir_for_local = src_dir.clone();
@@ -92,7 +102,13 @@ fn main() -> Result<(), anyhow::Error> {
     if verbose {
         println!("Using libssh {}", SSH::version());
     }
-    let mut ssh = match SSHManager::new(hostname, username, ssh::LogLevel::NOLOG, num_workers) {
+    let mut ssh = match SSHManager::new(
+        hostname,
+        username,
+        ssh::LogLevel::NOLOG,
+        num_workers,
+        progress_sender.clone(),
+    ) {
         Ok(s) => s,
         Err(err) => {
             eprintln!("Could not ssh to '{username}@{hostname}': {err}");
@@ -100,6 +116,7 @@ fn main() -> Result<(), anyhow::Error> {
         }
     };
 
+    println!("Gathering information from {hostname}..");
     ssh.upload_primary(HELPER_SRC, helper_dst)?;
 
     let remote_cmd = &format!("{helper_dst} {dst_dir}");
@@ -134,7 +151,7 @@ fn main() -> Result<(), anyhow::Error> {
             l.split_once(HELPER_SEP)
                 .map_or(("", 0), |(k, v)| (k, v.parse().unwrap()))
         })
-        .filter(|(name, _)| is_include_hidden || !name.starts_with("."))
+        .filter(|(name, _)| is_include_hidden || !name.starts_with('.'))
         .collect();
 
     // join local check
@@ -154,15 +171,20 @@ fn main() -> Result<(), anyhow::Error> {
     };
 
     // compare
-
+    if verbose {
+        println!("Comparing local and remote files");
+    }
+    let mut num_upload_bytes = 0;
     let mut upload = Vec::new();
-    for (filename, l_crc32) in local.iter() {
+    for (filename, (l_crc32, l_size)) in local.iter() {
         match remote.get(filename.as_str()) {
             None => {
                 upload.push(filename);
+                num_upload_bytes += l_size;
             }
             Some(r_crc32) if r_crc32 != l_crc32 => {
                 upload.push(filename);
+                num_upload_bytes += l_size;
             }
             _ => {} // they are the same
         }
@@ -188,10 +210,20 @@ fn main() -> Result<(), anyhow::Error> {
 
     if is_dry_run {
         ssh = ssh.switch_to_dry_run();
+    } else {
+        let num_upload_files = upload.len();
+        thread::spawn(move || run_output(num_upload_files, num_upload_bytes, progress_receiver));
+    }
+
+    if upload.is_empty() && delete.is_empty() {
+        println!("Directories are already identical");
+        ssh.stop();
+        return Ok(());
     }
 
     // action
 
+    let t_start = Instant::now();
     for filename in upload {
         // Do we need to make the parent dir(s)?
         let p = path::PathBuf::from(filename);
@@ -215,22 +247,30 @@ fn main() -> Result<(), anyhow::Error> {
         ssh.upload(
             &format!("{src_dir}{filename}"),
             &format!("{dst_dir}{filename}"),
+            true,
         )?;
     }
 
+    if verbose {
+        println!("Delete remote files that are absent locally");
+    }
     for filename in delete {
         ssh.delete(&format!("{dst_dir}{}", filename))?;
     }
 
     ssh.stop();
+    let took_s = t_start.elapsed();
+    thread::sleep(Duration::from_millis(10)); // make sure Finished is last msg
+    let _ = progress_sender.send(Progress::Finished(took_s));
 
     Ok(())
 }
 
+// returns map of filepath->(checksum, filesize)
 fn checksum_dir(
     path: path::PathBuf,
     is_include_hidden: bool,
-) -> Result<HashMap<String, u32>, anyhow::Error> {
+) -> Result<HashMap<String, (u32, u64)>, anyhow::Error> {
     let path_len = path.to_string_lossy().len();
     let mut out = HashMap::with_capacity(64);
     let mut dirs = vec![path];
@@ -248,6 +288,7 @@ fn checksum_dir(
                 dirs.push(file.path());
             } else {
                 let f = fs::File::open(file.path())?;
+                let file_size = f.metadata()?.len();
                 let mut f = BufReader::new(f);
                 let mut ubuf = [0; 8];
 
@@ -272,7 +313,7 @@ fn checksum_dir(
                         .get(path_len..)
                         .unwrap()
                         .to_string(),
-                    (checksum & CRC32) as u32,
+                    ((checksum & CRC32) as u32, file_size),
                 );
             }
         }
@@ -281,51 +322,7 @@ fn checksum_dir(
 }
 
 /* TODO
- - cpuid for whatever that illegal instruction is
-
- - also delete on multiple conns?
- - nice output:
-
-   see rtest/src/bin/console.rs
-
-   (x/total): filename \align-right size/s | size \t time-taken
-    eg:
-    (152/178): urw-base35-fonts-20200910-11.fc35.noarch.rpm              75 kB/s |  10 kB     00:01
-        at the bottom same thing but with live progress bar (but how to do with N threads?)
-
-    cargo does :
-
-        Compiling git2-curl v0.15.0
-        Compiling cargo v0.64.0 (/home/graham/src/cargo)
-        Building [=======================> ] 166/168: cargo, othercrate, etcrate
-
-        only the last line ("Building ..." changes)
-
-        and then
-        Finished dev [unoptimized + debuginfo] target(s) in 44.71s
-
-    We only need to update the last line from cursor to end, using EL ANSI command: b"\x1B[K"
-    For color use crate termcolor or direct ANSI
-
-    Get terminal width:
-
-    pub fn stderr_width() -> TtyWidth {
-        unsafe {
-            let mut winsize: libc::winsize = mem::zeroed();
-            // The .into() here is needed for FreeBSD which defines TIOCGWINSZ
-            // as c_uint but ioctl wants c_ulong.
-            if libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ.into(), &mut winsize) < 0 {
-                return TtyWidth::NoTty;
-            }
-            if winsize.ws_col > 0 {
-                TtyWidth::Known(winsize.ws_col as usize)
-            } else {
-                TtyWidth::NoTty
-            }
-        }
-    }
-
- - remote in a thread?
  - rcpl-h (asm) if file > size crc in a thread (with max thread as num CPUs)
  - rcpl-h (asm) make it as small as possible
+ - embed the helper
 */

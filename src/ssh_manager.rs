@@ -1,3 +1,4 @@
+use crate::progress_message::Progress;
 use crate::remote::Remote;
 use crate::ssh::{LogLevel, MockSSH, SSH};
 use crossbeam_channel::{unbounded, Sender};
@@ -16,8 +17,9 @@ impl SSHManager {
         username: &str,
         log_level: LogLevel,
         num_workers: usize,
+        progress_sender: Sender<Progress>,
     ) -> anyhow::Result<SSHManager> {
-        let primary = SSH::new(host, username, log_level)?;
+        let primary = SSH::new(host, username, log_level, progress_sender.clone())?;
         let (upload_sender, upload_receiver) = unbounded::<(String, String)>();
         let mut upload_workers = Vec::with_capacity(num_workers);
 
@@ -31,15 +33,16 @@ impl SSHManager {
             let host = host.clone();
             let username = username.clone();
             let upload_receiver = upload_receiver.clone();
+            let progress_sender = progress_sender.clone();
             let ssh_lock = ssh_lock.clone();
             let thread_handle = thread::Builder::new()
                 .name(format!("upload_worker_{tid}"))
                 .spawn(move || {
                     let guard = ssh_lock.lock();
-                    let ssh = SSH::new(&host, &username, log_level).unwrap();
+                    let ssh = SSH::new(&host, &username, log_level, progress_sender).unwrap();
                     drop(guard);
                     for (src, dst) in upload_receiver {
-                        ssh.upload(&src, &dst).unwrap();
+                        ssh.upload(&src, &dst, true).unwrap();
                     }
                 })?;
             upload_workers.push(thread_handle);
@@ -53,9 +56,9 @@ impl SSHManager {
     }
 
     // Upload using the primary connection, not the thread pool.
-    // This makes upload blocking.
+    // This makes upload blocking and does not output progress.
     pub fn upload_primary(&self, src: &str, dst: &str) -> anyhow::Result<()> {
-        self.primary.upload(src, dst)
+        self.primary.upload(src, dst, false)
     }
 
     // Replaces self with a mocked SSH connection, so we can report what would really happen
@@ -93,7 +96,7 @@ impl Remote for SSHManager {
     // upload a file to remote.
     // queues for upload and returns immediately.
     // call stop() once all the uploads are queued to wait for completion.
-    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
+    fn upload(&self, src: &str, dst: &str, _: bool) -> anyhow::Result<()> {
         match &self.upload_sender {
             // normal multi-threaded mode
             Some(sender) => {
@@ -101,7 +104,7 @@ impl Remote for SSHManager {
                 Ok(())
             }
             // dry-run mode
-            None => self.primary.upload(src, dst),
+            None => self.primary.upload(src, dst, false),
         }
     }
 }
