@@ -187,8 +187,7 @@ impl Remote for SSH {
     //
     // src: local full path of filename to upload
     // dst: remote full path of destination file to create or overwrite
-    // with_progress: true to send progress reports on chanell
-    fn upload(&self, src: &str, dst: &str, with_progress: bool) -> anyhow::Result<()> {
+    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
         let stat = fs::metadata(src)?;
         let perms = stat.permissions().mode();
         let mut buf = [0u8; SFTP_CHUNK_SIZE];
@@ -213,9 +212,7 @@ impl Remote for SSH {
                 bail!("Short write: {bytes_written} / {bytes_read}");
             }
             total_bytes += bytes_written;
-            if with_progress {
-                let _ = self.progress.send(Progress::Part(bytes_written));
-            }
+            let _ = self.progress.send(Progress::Part(bytes_written));
         }
         if total_bytes != stat.len() as usize {
             eprintln!(
@@ -226,10 +223,23 @@ impl Remote for SSH {
                 total_bytes
             );
         }
-        if with_progress {
-            let _ = self
-                .progress
-                .send(Progress::Complete(src.to_string(), total_bytes));
+        let _ = self
+            .progress
+            .send(Progress::Complete(src.to_string(), total_bytes));
+        Ok(())
+    }
+
+    fn upload_bytes(&self, src_bytes: &[u8], dst: &str) -> anyhow::Result<()> {
+        let rfile = self
+            .sftp_session
+            .open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0o700)?;
+        let ret = rfile.write(src_bytes);
+        if ret < 0 {
+            return Err(self.get_sftp_err(&format!("upload_bytes to {}", dst)));
+        }
+        let bytes_written = ret as usize;
+        if bytes_written != src_bytes.len() {
+            bail!("Short write: {bytes_written} / {}", src_bytes.len());
         }
         Ok(())
     }
@@ -339,8 +349,12 @@ impl Remote for MockSSH {
         println!("would mkdir {dir} with perms {perms:o}"); // :o is octal
         Ok(())
     }
-    fn upload(&self, src: &str, dst: &str, _: bool) -> anyhow::Result<()> {
+    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
         println!("would upload {src} -> {dst}");
+        Ok(())
+    }
+    fn upload_bytes(&self, _: &[u8], _: &str) -> anyhow::Result<()> {
+        // only for helper so don't display it as activity
         Ok(())
     }
     fn delete(&self, path: &str) -> anyhow::Result<()> {

@@ -42,7 +42,7 @@ impl SSHManager {
                     let ssh = SSH::new(&host, &username, log_level, progress_sender).unwrap();
                     drop(guard);
                     for (src, dst) in upload_receiver {
-                        ssh.upload(&src, &dst, true).unwrap();
+                        ssh.upload(&src, &dst).unwrap();
                     }
                 })?;
             upload_workers.push(thread_handle);
@@ -53,12 +53,6 @@ impl SSHManager {
             upload_sender: Some(upload_sender),
             upload_workers,
         })
-    }
-
-    // Upload using the primary connection, not the thread pool.
-    // This makes upload blocking and does not output progress.
-    pub fn upload_primary(&self, src: &str, dst: &str) -> anyhow::Result<()> {
-        self.primary.upload(src, dst, false)
     }
 
     // Replaces self with a mocked SSH connection, so we can report what would really happen
@@ -93,10 +87,18 @@ impl Remote for SSHManager {
         self.primary.delete(path)
     }
 
+    // Special function to upload the helper binary.
+    // Takes bytes instead of a src filename and
+    // uploads using the primary connection, not the thread pool.
+    // This makes upload blocking and does not output progress.
+    fn upload_bytes(&self, src_bytes: &[u8], dst: &str) -> anyhow::Result<()> {
+        self.primary.upload_bytes(src_bytes, dst)
+    }
+
     // upload a file to remote.
     // queues for upload and returns immediately.
     // call stop() once all the uploads are queued to wait for completion.
-    fn upload(&self, src: &str, dst: &str, _: bool) -> anyhow::Result<()> {
+    fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
         match &self.upload_sender {
             // normal multi-threaded mode
             Some(sender) => {
@@ -104,7 +106,7 @@ impl Remote for SSHManager {
                 Ok(())
             }
             // dry-run mode
-            None => self.primary.upload(src, dst, false),
+            None => self.primary.upload(src, dst),
         }
     }
 }

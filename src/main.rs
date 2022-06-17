@@ -30,9 +30,11 @@ const DESC: &str = r#"Example: rcple /home/graham/myfiles graham@myhost.com:/var
 The format is intentionally the same as `scp`."#;
 
 const CRC32: u64 = 0xFFFFFFFF;
-const HELPER_SRC: &str = "/home/graham/src/rcple/asm/rcple-h";
 const HELPER_SEP: char = ':';
 const DEFAULT_HELPER_DST: &str = "/tmp/rcple-h";
+
+// built by build.rs (nasm+ld)
+static HELPER: &'static [u8] = include_bytes!("../asm/rcple-h");
 
 fn main() -> Result<(), anyhow::Error> {
     let args = clap::Command::new("rcple src_dir user@host:remote_dst_dir")
@@ -82,12 +84,6 @@ fn main() -> Result<(), anyhow::Error> {
         dst_dir.push('/');
     }
 
-    // check we have the helper binary
-    if !path::Path::new(HELPER_SRC).exists() {
-        eprintln!("Helper binary '{}' not found.", HELPER_SRC);
-        process::exit(1);
-    };
-
     let (progress_sender, progress_receiver) = unbounded::<Progress>();
 
     // start local check in the background
@@ -117,7 +113,7 @@ fn main() -> Result<(), anyhow::Error> {
     };
 
     println!("Gathering information from {hostname}..");
-    ssh.upload_primary(HELPER_SRC, helper_dst)?;
+    ssh.upload_bytes(HELPER, helper_dst)?;
 
     let remote_cmd = &format!("{helper_dst} {dst_dir}");
     let (output, exit_status) = ssh.run_remote_cmd(remote_cmd)?;
@@ -247,7 +243,6 @@ fn main() -> Result<(), anyhow::Error> {
         ssh.upload(
             &format!("{src_dir}{filename}"),
             &format!("{dst_dir}{filename}"),
-            true,
         )?;
     }
 
