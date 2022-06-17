@@ -1,6 +1,7 @@
 main: main.s
 	nasm -g -felf64 main.s
-	ld -n -N -o rcple-h  main.o
+	# the -s strips debug info, remove for gdb
+	ld -s -n -N -o rcple-h  main.o
 
 clean:
 	rm *.o

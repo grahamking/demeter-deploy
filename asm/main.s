@@ -51,11 +51,9 @@ endstruc
 ;; .data
 ;;
 section .data align=16
-	MAX_FNAME_LEN: equ 100
 	MAX_PATH_LEN: equ 256
 	USAGE: db `Usage: rcple-h <dir>\n\0`
 	CR: db "",10,0  ; 0 is the terminating null byte
-	SPACE: db " ",0
 	COLON: db ":",0
 	BUF_SIZE: equ 32768 ; read 32k of directory entries at a time
 	DT_DIR: equ 4 ; directory
@@ -63,94 +61,110 @@ section .data align=16
 	MAP_SHARED: equ 1 ; for mmap
 	PROT_READ: equ 1 ; mmap a file as read only
 	SLASH: equ "/" ; path separator
-	MISSING_SLASH: db `Path must end in a single /\n\0`
 	DOT_DIR: db ".",0
 
 ; error messages
 
 	EM_AVX2: db "Need AVX2",10,0
-	EM_OPEN_FILE: db "file open error for CRCing: ",0
-	EM_OPEN_DIR: db "dir open error for listing: ",0
-	EM_FSTAT: db "fstat error: ",0
-	EM_GETDENTS64: db "getdents64 error: ",0
-	EM_MMAP: db "mmap error: ",0
-	EM_MUNMAP: db "munmap error: ",0
-	EM_CHDIR: db "chdir error: ",0
-	EM_CLOSE: db "close error: ",0
+	EM_MISSING_SLASH: db `Path must end in a single /\n\0`
+	EM_OPEN_FILE: db "file open err for CRCing: ",0
+	EM_OPEN_DIR: db "dir open err for listing: ",0
+	EM_FSTAT: db "fstat err: ",0
+	EM_GETDENTS64: db "getdents64 err: ",0
+	EM_MMAP: db "mmap err: ",0
+	EM_MUNMAP: db "munmap err: ",0
+	EM_CHDIR: db "chdir err: ",0
+	EM_CLOSE: db "close err: ",0
 
 ; fd's
-	STDIN: equ 0
 	STDOUT: equ 1
 	STDERR: equ 2
 
 ; syscalls
-	SYS_READ: equ 0
 	SYS_WRITE: equ 1
 	SYS_OPEN: equ 2
 	SYS_CLOSE: equ 3
 	SYS_FSTAT: equ 5
 	SYS_MMAP: equ 9
 	SYS_MUNMAP: equ 11
-	SYS_IOCTL: equ 16
-	SYS_MSYNC: equ 26
 	SYS_EXIT: equ 60
 	SYS_CHDIR: equ 80
 	SYS_GETDENTS64: equ 217
 
 ; err codes
 	ERR0: db "",0 ; never happens
-	ERR1: db "EPERM Operation not permitted",10,0
-	ERR2: db "ENOENT No such file or directory",10,0
-	ERR3: db "ESRCH No such process",10,0
-	ERR4: db "EINTR Interrupted system call",10,0
-	ERR5: db "EIO I/O error ",10,0
-	ERR6: db "ENXIO No such device or address",10,0
-	ERR7: db "E2BIG Argument list too long",10,0
-	ERR8: db "ENOEXEC Exec format error",10,0
-	ERR9: db "EBADF Bad file number ",10,0
-	ERR10: db "ECHILD No child processes",10,0
-	ERR11: db "EAGAIN Try again",10,0
-	ERR12: db "ENOMEM Out of memory",10,0
-	ERR13: db "EACCES Permission denied",10,0
-	ERR14: db "EFAULT Bad address",10,0
-	ERR15: db "ENOTBLK Block device required",10,0
-	ERR16: db "EBUSY Device or resource busy",10,0
-	ERR17: db "EEXIST File exists",10,0
-	ERR18: db "EXDEV Cross-device link",10,0
-	ERR19: db "ENODEV No such device",10,0
-	ERR20: db "ENOTDIR Not a directory",10,0
-	ERR21: db "EISDIR Is a directory",10,0
-	ERR22: db "EINVAL Invalid argument",10,0
-	ERR23: db "ENFILE File table overflow",10,0
-	ERR24: db "EMFILE Too many open files",10,0
-	ERR25: db "ENOTTY Not a typewriter",10,0
-	ERR26: db "ETXTBSY Text file busy",10,0
-	ERR27: db "EFBIG File too large",10,0
-	ERR28: db "ENOSPC No space left on device",10,0
-	ERR29: db "ESPIPE Illegal seek",10,0
-	ERR30: db "EROFS Read-only file system",10,0
-	ERR31: db "EMLINK Too many links",10,0
-	ERR32: db "EPIPE Broken pipe",10,0
-	ERR33: db "EDOM	 Math argument out of domain of func",10,0
-	ERR34: db "ERANGE Math result not representable",10,0
+	ERR1: db "EPERM",10,0 ; Operation not permitted
+	ERR2: db "ENOENT",10,0 ; No such file or directory
+	ERR3: db "ESRCH",10,0 ; No such process
+	ERR4: db "EINTR",10,0 ; Interrupted system call
+	ERR5: db "EIO",10,0 ; I/O error
+	ERR6: db "ENXIO",10,0 ; No such device or address
+	ERR7: db "E2BIG",10,0 ; Argument list too long
+	ERR8: db "ENOEXEC",10,0 ; Exec format error
+	ERR9: db "EBADF",10,0 ; Bad file number
+	ERR10: db "ECHILD",10,0 ; No child processes
+	ERR11: db "EAGAIN",10,0 ; Try again
+	ERR12: db "ENOMEM",10,0 ; Out of memory
+	ERR13: db "EACCES",10,0 ; Permission denied
+	ERR14: db "EFAULT",10,0 ; Bad address
+	ERR15: db "ENOTBLK",10,0 ; Block device required
+	ERR16: db "EBUSY",10,0 ; Device or resource busy
+	ERR17: db "EEXIST",10,0 ; File exists
+	ERR18: db "EXDEV",10,0 ; Cross-device link
+	ERR19: db "ENODEV",10,0 ; No such device
+	ERR20: db "ENOTDIR",10,0 ; Not a directory
+	ERR21: db "EISDIR",10,0 ; Is a directory
+	ERR22: db "EINVAL",10,0 ; Invalid argument
+	ERR23: db "ENFILE",10,0 ; File table overflow
+	ERR24: db "EMFILE",10,0 ; Too many open files
+	ERR25: db "ENOTTY",10,0 ; Not a typewriter
+	ERR26: db "ETXTBSY",10,0 ; Text file busy
+	ERR27: db "EFBIG",10,0 ; File too large
+	ERR28: db "ENOSPC",10,0 ; No space left on device
+	ERR29: db "ESPIPE",10,0 ; Illegal seek
+	ERR30: db "EROFS",10,0 ; Read-only file system
+	ERR31: db "EMLINK",10,0 ; Too many links
+	ERR32: db "EPIPE",10,0 ; Broken pipe
+	ERR33: db "EDOM",10,0 ;	 Math argument out of domain of func
+	ERR34: db "ERANGE",10,0 ; Math result not representable"
 	ERR35: db "",10,0 ; custom error, no code or name
 	ERRS: dq ERR0, ERR1, ERR2, ERR3, ERR4, ERR5, ERR6, ERR7, ERR8, ERR9, ERR10, ERR11, ERR12, ERR13, ERR14, ERR15, ERR16, ERR17, ERR18, ERR18, ERR20, ERR21, ERR22, ERR23, ERR24, ERR25, ERR26, ERR27, ERR28, ERR29, ERR30, ERR31, ERR32, ERR33, ERR34, ERR35
 	ERRS_BYTE_LEN: equ $-ERRS  ; will need to divide by 8 to get num items
 
 ;;
 ;; .bss: Global variables
+;; On x86/64 we want the stack to stay aligned on 64 bits, so there's no point
+;; making variables under 8 bytes, we'd have to extend them to push.
+;; We often treat them as if they were 4 bytes (mov eax, [file_fd]).
 ;;
-section .bss align=64
-	path_ptr: resb MAX_PATH_LEN  ; we store file path here, must be 64 byte aligned
-	active_dir_ptr: resb MAX_PATH_LEN ; the directory we are working on
-	dir_fd_ptr: resb 8
-	file_fd_ptr: resb 8
-	file_size_ptr: resb 8
-	mmap_ptr_ptr: resb 8		; address of mmap'ed file
+
+section .bss align=8
+	; address of name of directory passed on cmd line
 	dir_name_ptr: resb 8
-	dir_name_len_ptr: resb 8
-	active_dir_len_ptr: resb 8
-	bytes_to_process_ptr: resb 4
+	; length of above
+	dir_name_len: resb 8
+
+	; fd of the directory we are looking at
+	dir_fd: resb 8
+	; bytes of directory entries remaining to process in dir we are looking at
+	bytes_to_process: resb 8
+
+	; fd of the file we are CRC-ing
+	file_fd: resb 8
+	; size of the file we are CRC-ing
+	file_size: resb 8
+	; address of mmap'ed file, which is how we load a file to CRC it
+	mmap_ptr: resb 8
+
+	; length of name of directory we are working on (< MAX_PATH_LEN)
+	active_dir_len: resb 8
+	; the name of the directory we are working on as [char]
+	active_dir: resb MAX_PATH_LEN
+
+	; full path (active_dir + filename) to print to output
+	; vmovdqa (AVX2) requires 32 byte (256 bit) alignment
+	alignb 32
+	full_path: resb MAX_PATH_LEN
 
 ;;
 ;; .text
@@ -184,11 +198,10 @@ _start:
 	; we'll need these later to make full paths
 	mov [dir_name_ptr], rdi
 	call strlen
-	mov [dir_name_len_ptr], rax
 
 	; check we have a slash at end of dir
 	dec eax ; examine last character
-	mov rsi, [dir_name_ptr]		; dir_name_ptr contains an address, so double indirect
+	mov rsi, [dir_name_ptr]		; dir_name_ptr contains an address
 	cmp BYTE [rsi + rax], SLASH
 	jne missing_slash_err
 
@@ -198,7 +211,7 @@ _start:
 	syscall
 	err_check EM_CHDIR
 
-	; zero the registers we use to clear path_ptr
+	; zero the registers we use to clear full_path
 	; those are either not modified during the program or reset (xmm0 in strlen)
 	; so safe to do just once
 	vpxor ymm0, ymm0, ymm0
@@ -207,8 +220,8 @@ _start:
 	; start in current directory
 	xor eax, eax
 	mov ax, [DOT_DIR]
-	mov [active_dir_ptr], ax
-	inc QWORD [active_dir_len_ptr]
+	mov [active_dir], ax
+	inc QWORD [active_dir_len]
 	call handle_dir
 
 	; end
@@ -217,29 +230,29 @@ _start:
 ;;
 ;; handle_dir: crc32 all the files in a directory
 ;; calling itself on sub directories.
-;; Expects [active_dir_ptr] to contain a 'const char* path' of the directory to crc,
+;; Expects [active_dir] to contain the bytes of the directory name to crc,
 ;;  relative to dir passed on cmd line.
 ;;
 handle_dir:
 	; open the dir
-	mov rdi, active_dir_ptr ; rdi now has an address
+	mov rdi, active_dir ; rdi now has an address
 	mov esi, 0x1000	; flags: O_RDONLY (0) | O_DIRECTORY (octal 0o200000)
 	mov eax, SYS_OPEN
 	syscall
 	cmp eax, -13	; EACCES Permission denied, we won't be able to rcp over it
 	je .ret			; so skip it.
-	cmp rax, 0
+	cmp eax, 0
 	jl handle_dir_err
 
 	; rax will be fd we just opened
-	mov [dir_fd_ptr], rax ; save open directory fd
+	mov [dir_fd], rax ; save open directory fd
 
 	sub rsp, BUF_SIZE
 
 	; get directory entries
 
 .next_files_chunk:
-	mov edi, [dir_fd_ptr]
+	mov rdi, [dir_fd]
 
 	mov rsi, rsp		; address of space for linux_dirent64 structures
 	mov edx, BUF_SIZE	; size of buffer (rsi) in bytes
@@ -262,7 +275,7 @@ handle_dir:
 .done_read:
 	add rsp, BUF_SIZE
 
-	mov rdi, [dir_fd_ptr]
+	mov rdi, [dir_fd]
 	mov eax, SYS_CLOSE
 	safe_syscall
 	err_check EM_CLOSE
@@ -279,7 +292,7 @@ handle_dir:
 process_single:
 
 	mov rbx, rdi
-	mov DWORD [bytes_to_process_ptr], esi ; number of bytes in all records
+	mov [bytes_to_process], rsi ; number of bytes in all records
 
 .process_filenames:
 	cmp BYTE [rbx+dirent64.d_type], DT_REG
@@ -298,40 +311,39 @@ process_single:
 
 	; it's a dir we want to handle, recurse
 	push rbx
-	push QWORD [dir_fd_ptr]
-	push QWORD [bytes_to_process_ptr]
-	push QWORD [active_dir_len_ptr]
+	push QWORD [dir_fd]
+	push QWORD [bytes_to_process]
+	push QWORD [active_dir_len]
 
 	; append this dir to current one
 
 	; add a slash separator
-	mov rcx, [active_dir_len_ptr]
-	mov rdi, active_dir_ptr
-	add rdi, rcx
+	mov rcx, [active_dir_len]
+	mov rdi, active_dir		; rdi now has an address
+	add rdi, rcx			; increase address by length
 	mov BYTE [rdi], SLASH
 	inc rcx
 
 	; add this dir
 	lea rdi, [rbx+dirent64.d_name]	; filename field of struct
-	call strlen ; length of dir name, which is in rdi
-	lea rdi, [active_dir_ptr + rcx] ; destination
+	call strlen ; returns (rax) length of dir name, which is in rdi
+	lea rdi, [active_dir + rcx]		; destination
 	lea rsi, [rbx+dirent64.d_name]	; source
 	mov ecx, eax					; copy rcx many bytes (strlen result)
 	inc ecx							;  plus 1 to include the null terminator.
-	;inc QWORD [active_dir_len_ptr]
-	add QWORD [active_dir_len_ptr], rcx
+	add QWORD [active_dir_len], rcx
 	rep movsb
 
 	call handle_dir
 
-	pop QWORD [active_dir_len_ptr]
-	pop QWORD [bytes_to_process_ptr]
-	pop QWORD [dir_fd_ptr]
+	pop QWORD [active_dir_len]
+	pop QWORD [bytes_to_process]
+	pop QWORD [dir_fd]
 	pop rbx
 
-	; truncate active_dir_ptr contents to length before subdir call
-	mov rax, QWORD [active_dir_len_ptr]
-	mov BYTE [active_dir_ptr + rax], 0
+	; truncate active_dir contents to length before subdir call
+	mov rax, [active_dir_len]
+	mov BYTE [active_dir + rax], 0
 
 	jmp .move_to_next_record
 
@@ -339,24 +351,24 @@ process_single:
 .crc_file:
 
 	; zero path memory using AVX instructions
-	vmovdqa [path_ptr], ymm0
-	vmovdqa [path_ptr+32], ymm3
-	vmovdqa [path_ptr+64], ymm0
-	vmovdqa [path_ptr+96], ymm3
-	vmovdqa [path_ptr+128], ymm0
-	vmovdqa [path_ptr+160], ymm3
-	vmovdqa [path_ptr+192], ymm0
-	vmovdqa [path_ptr+224], ymm3
+	vmovdqa [full_path], ymm0
+	vmovdqa [full_path+32], ymm3
+	vmovdqa [full_path+64], ymm0
+	vmovdqa [full_path+96], ymm3
+	vmovdqa [full_path+128], ymm0
+	vmovdqa [full_path+160], ymm3
+	vmovdqa [full_path+192], ymm0
+	vmovdqa [full_path+224], ymm3
 
 	; copy dir path
 
-	mov rdi, active_dir_ptr
+	mov rdi, active_dir
 	call strlen
 	mov rcx, rax
 
 	cld
-	mov rdi, path_ptr			; destination
-	mov rsi, active_dir_ptr		; source
+	mov rdi, full_path		; destination
+	mov rsi, active_dir		; source
 	rep movsb
 
 	; path separator
@@ -372,7 +384,7 @@ process_single:
 	pop rdi      ; destination, continue after path. source was set earlier
 	rep movsb
 
-	mov rdi, path_ptr   ; full path of file to crc
+	mov rdi, full_path   ; full path of file to crc
 	call crc_print
 
 	; move to next record
@@ -380,7 +392,7 @@ process_single:
 	mov ax, WORD [rbx+dirent64.d_reclen]
 	add rbx, rax
 
-	sub [bytes_to_process_ptr], eax
+	sub [bytes_to_process], eax
 	jnz .process_filenames
 	ret
 ; end process_filenames
@@ -420,21 +432,21 @@ crc_print:
 	je .ret
 	err_check EM_OPEN_FILE
 
-	mov [file_fd_ptr], rax
+	mov [file_fd], rax
 
 	; space to put stat buffer, on the stack
 	sub rsp, 144 ; struct stat in stat/stat.h
 
 	; fstat file to get size
 	mov eax, SYS_FSTAT
-	mov edi, [file_fd_ptr]
+	mov edi, [file_fd]
 	mov rsi, rsp	; &stat
 	safe_syscall
 	err_check EM_FSTAT
 
 	mov rax, [rsp + 48] ; stat st_size is 44 bytes into the struct
 						; but I guess 4 bytes of padding?
-	mov [file_size_ptr], rax
+	mov [file_size], rax
 	add rsp, 144		; pop stat buffer
 
 	; if the file is empty the crc will be 0, so skip straight to output.
@@ -449,20 +461,20 @@ crc_print:
 	mov edi, 0				; let kernel choose starting address
 	mov edx, PROT_READ
 	mov r10, MAP_SHARED		; flags
-	mov r8, [file_fd_ptr]
+	mov r8, [file_fd]
 	mov r9, 0				; offset in the file to start mapping
 	safe_syscall
 	err_check EM_MMAP
 
 	; mmap_ptr is **u8. It contains the address of a reserved (.bss) area
 	; that reserved area contains the address of the mmap section
-	mov [mmap_ptr_ptr], rax ; mmap address
+	mov [mmap_ptr], rax ; mmap address
 
 	; crc32, which has to happen 8 bytes at a time
 
 	mov eax, 0xFFFFFFFF
-	mov rcx, [file_size_ptr]
-	mov rsi, [mmap_ptr_ptr]
+	mov rcx, [file_size]
+	mov rsi, [mmap_ptr]
 .crc32_next_8:
 	crc32 rax, QWORD [rsi]
 	add rsi, 8
@@ -472,8 +484,8 @@ crc_print:
 	; munmap
 	push rax
 	mov eax, SYS_MUNMAP
-	mov rdi, [mmap_ptr_ptr]
-	mov esi, [file_size_ptr]
+	mov rdi, [mmap_ptr]
+	mov rsi, [file_size]
 	safe_syscall
 	err_check EM_MUNMAP
 	pop rax
@@ -496,7 +508,7 @@ crc_print:
 	call print
 
 	; close file so we don't run out of descriptors in large folders
-	mov rdi, [file_fd_ptr]
+	mov edi, [file_fd]
 	mov eax, SYS_CLOSE
 	safe_syscall
 	err_check EM_CLOSE
@@ -652,7 +664,7 @@ err:
 	cmp eax, ecx
 	jge .err_numeric
 
-	mov rdi, QWORD [ERRS+rax*8]
+	mov rdi, [ERRS+rax*8]
 	call print_err
 	jmp exit
 
@@ -690,18 +702,6 @@ abs_rax:
 	xor eax, edx
 	sub eax, edx
 	mov rdx, r11	; pop rdx
-
-	; MMX - 2x slower
-	;pinsrw xmm0, eax, 0
-	;pabsw xmm1, xmm0
-	;pextrw eax, xmm1, 0
-
-	; FPU - at least 5x slower, must go via memory
-	;push rax			; can't copy directly x86 reg -> x87 reg, need to go via memory
-	;fild qword [rsp]   ; copy to x87 register stack
-	;fabs				; abs(top of FPU stack)
-	;fistp qword [rsp]  ; copy from x87 register stack
-	;pop rax			; rax now has abs value
 
 	ret
 
@@ -774,7 +774,7 @@ print_usage:
 ;; print missing slash error and exit
 ;;
 missing_slash_err:
-	mov rdi, MISSING_SLASH
+	mov rdi, EM_MISSING_SLASH
 	call print
 
 	mov edi, 1  ; return code
