@@ -70,7 +70,6 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     // split remote string into username, hostname and path
-
     let mut from_env = "".to_string();
     let (username, remote_str) = remote_str.split_once('@').unwrap_or_else(|| {
         from_env = env::var("USERNAME").expect("missing @ in remote part and $USERNAME not set");
@@ -84,20 +83,24 @@ fn main() -> Result<(), anyhow::Error> {
         dst_dir.push('/');
     }
 
-    let (progress_sender, progress_receiver) = unbounded::<Progress>();
-
     // start local check in the background
-
     let src_dir_for_local = src_dir.clone();
     let local_thread = thread::Builder::new()
         .name("local checksum".to_string())
-        .spawn(move || checksum_dir(src_dir_for_local.into(), is_include_hidden))?;
+        .spawn(move || {
+            let t_start = Instant::now();
+            let out = checksum_dir(src_dir_for_local.into(), is_include_hidden);
+            if verbose {
+                println!("Local checksum took {:?}", t_start.elapsed());
+            }
+            out
+        })?;
 
     // remote
-
     if verbose {
         println!("Using libssh {}", SSH::version());
     }
+    let (progress_sender, progress_receiver) = unbounded::<Progress>();
     let mut ssh = match SSHManager::new(
         hostname,
         username,
@@ -150,8 +153,7 @@ fn main() -> Result<(), anyhow::Error> {
         .filter(|(name, _)| is_include_hidden || !name.starts_with('.'))
         .collect();
 
-    // join local check
-
+    // join local checksumming thread
     let local = match local_thread.join() {
         Ok(checksum_dir_ret) => match checksum_dir_ret {
             Ok(c) => c,
