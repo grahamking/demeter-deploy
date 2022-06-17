@@ -1,5 +1,7 @@
 use std::cmp::max;
+use std::collections::HashMap;
 use std::io::{stdout, Write};
+use std::time::Duration;
 
 use crate::progress_message::Progress;
 use crossbeam_channel::Receiver;
@@ -13,11 +15,18 @@ pub fn run_output(total_files: usize, total_bytes: u64, recv: Receiver<Progress>
         return;
     }
     use Progress::*;
+    let mut in_progress = HashMap::new();
     let mut files_so_far = 0;
     let mut bytes_so_far = 0;
     while let Ok(progress) = recv.recv() {
         match progress {
-            Complete(filename, size) => {
+            Start(filename, size) => {
+                in_progress.insert(filename, size);
+            }
+            Complete(filename) => {
+                let size = in_progress
+                    .remove(&filename)
+                    .expect("Got Complete for file that didn't have Start");
                 let msg = format!("\rUploaded {filename} ({})", humanize(size));
                 {
                     let mut out = stdout();
@@ -30,8 +39,14 @@ pub fn run_output(total_files: usize, total_bytes: u64, recv: Receiver<Progress>
             Part(bytes) => {
                 bytes_so_far += bytes;
                 let bytes_pct = (bytes_so_far as f64) / (total_bytes as f64) * 100.0;
+                let mut active_files: Vec<&str> = in_progress.keys().map(|s| s.as_ref()).collect();
+                active_files.sort();
                 let msg = format!(
-                    "\rProgress: {files_so_far} / {total_files} files, {bytes_pct:.0}% of bytes."
+                    "\rProgress: {} / {} files, {:.0}% of bytes. [{}]",
+                    files_so_far,
+                    total_files,
+                    bytes_pct,
+                    active_files.join(" "),
                 );
                 {
                     let mut out = stdout();
@@ -40,11 +55,10 @@ pub fn run_output(total_files: usize, total_bytes: u64, recv: Receiver<Progress>
                 }
             }
             Finished(elapsed) => {
-                let bytes_sec = total_bytes / max(elapsed.as_secs(), 1);
                 let msg = format!(
-                    "\rFinished {total_files} files, {} in {:?} ({bytes_sec} KiB/s)\n",
-                    humanize(total_bytes as usize),
-                    elapsed,
+                    "\rFinished {total_files} files, {} at {}.\n",
+                    humanize(total_bytes),
+                    humanize_speed(total_bytes, elapsed),
                 );
                 let mut out = stdout();
                 out.write_all(msg.as_bytes()).unwrap();
@@ -54,13 +68,25 @@ pub fn run_output(total_files: usize, total_bytes: u64, recv: Receiver<Progress>
     }
 }
 
-fn humanize(size: usize) -> String {
+fn humanize(size: u64) -> String {
     let fsize = size as f64;
     if fsize > MB {
-        format!("{:02} MiB", (fsize / MB).round())
+        format!("{} MiB", (fsize / MB).round())
     } else if fsize > KB {
-        format!("{} KiB", (fsize / KB).round() as usize)
+        format!("{} KiB", (fsize / KB).round())
     } else {
         format!("{size} bytes")
+    }
+}
+
+fn humanize_speed(size: u64, time: Duration) -> String {
+    let t = max(time.as_secs(), 1) as f64;
+    let fsize = size as f64;
+    if fsize > MB {
+        format!("{:.2} MiB/s", (fsize / MB).round() / t)
+    } else if fsize > KB {
+        format!("{:.0} KiB/s", (fsize / KB).round() / t)
+    } else {
+        format!("{} B/s", fsize / t)
     }
 }

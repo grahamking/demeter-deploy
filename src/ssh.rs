@@ -189,6 +189,9 @@ impl Remote for SSH {
     // dst: remote full path of destination file to create or overwrite
     fn upload(&self, src: &str, dst: &str) -> anyhow::Result<()> {
         let stat = fs::metadata(src)?;
+        let _ = self
+            .progress
+            .send(Progress::Start(src.to_string(), stat.len()));
         let perms = stat.permissions().mode();
         let mut buf = [0u8; SFTP_CHUNK_SIZE];
         let rfile = self
@@ -223,9 +226,7 @@ impl Remote for SSH {
                 total_bytes
             );
         }
-        let _ = self
-            .progress
-            .send(Progress::Complete(src.to_string(), total_bytes));
+        let _ = self.progress.send(Progress::Complete(src.to_string()));
         Ok(())
     }
 
