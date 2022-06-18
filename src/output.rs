@@ -18,6 +18,7 @@ pub fn run_output(total_files: usize, total_bytes: u64, recv: Receiver<Progress>
     let mut in_progress = HashMap::new();
     let mut files_so_far = 0;
     let mut bytes_so_far = 0;
+    let mut prev_bytes_pct = 0.0;
     while let Ok(progress) = recv.recv() {
         match progress {
             Start(filename, size) => {
@@ -39,6 +40,11 @@ pub fn run_output(total_files: usize, total_bytes: u64, recv: Receiver<Progress>
             Part(bytes) => {
                 bytes_so_far += bytes;
                 let bytes_pct = (bytes_so_far as f64) / (total_bytes as f64) * 100.0;
+                if (prev_bytes_pct - bytes_pct).abs() < 1.0 {
+                    // only update display if > 1% progress
+                    continue;
+                }
+                prev_bytes_pct = bytes_pct;
                 let mut active_files: Vec<&str> = in_progress.keys().map(|s| s.as_ref()).collect();
                 active_files.sort();
                 let msg = format!(
