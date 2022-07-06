@@ -458,7 +458,7 @@ crc_print:
 	; mmap it
 	mov rsi, rax			; size
 	mov eax, SYS_MMAP
-	mov edi, 0				; let kernel choose starting address
+	mov edi, 0				; let kernel choose starting address, page aligned
 	mov edx, PROT_READ
 	mov r10, MAP_SHARED		; flags
 	mov r8, [file_fd]
@@ -475,6 +475,13 @@ crc_print:
 	mov eax, 0xFFFFFFFF
 	mov rcx, [file_size]
 	mov rsi, [mmap_ptr]
+
+	; - Optimization:
+	; https://github.com/htot/crc32c/blob/master/crc32c/crc_iscsi_v_pcl.asm
+	; Split area into 3, do 3 crc32 at a time. Three cache lines, and crc32 latency is 3
+	; finally combine with three crc32's with pclmulqdq.
+	; Only if file_size > ~200 bytes, otherwise this version is faster.
+	; - What if size not a multiple of 8?
 .crc32_next_8:
 	crc32 rax, QWORD [rsi]
 	add rsi, 8
