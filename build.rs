@@ -1,8 +1,6 @@
 // Build script to compile the assembler part
 // It then gets embedded in the binary.
 
-#![feature(process_exitcode_placeholder)]
-
 use std::env::var;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
