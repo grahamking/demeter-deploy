@@ -1,5 +1,5 @@
-;; rcpl-h
-;; Helper for rcpl. The main program will scp this file to remote,
+;; seed
+;; Helper for Demeter Deploy. The main program will scp this file to remote,
 ;; where it will gather CRC32 of all the files in given directory.
 ;; This helps main program know what to upload.
 
@@ -52,7 +52,7 @@ endstruc
 ;;
 section .data align=16
 	MAX_PATH_LEN: equ 256
-	USAGE: db `Usage: rcple-h <dir>\n\0`
+	USAGE: db `Usage: seed <dir>\n\0`
 	CR: db "",10,0  ; 0 is the terminating null byte
 	COLON: db ":",0
 	BUF_SIZE: equ 32768 ; read 32k of directory entries at a time

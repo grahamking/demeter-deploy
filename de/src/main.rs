@@ -1,3 +1,10 @@
+//
+// Part of Demeter Deploy
+// https://github.com/grahamking/demeter-deploy/
+//
+// This is the cmd-line
+//
+
 use core::arch::x86_64::_mm_crc32_u64;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -26,18 +33,19 @@ use progress_message::Progress;
 mod output;
 use output::run_output;
 
-const DESC: &str = r#"Example: rcple /home/graham/myfiles graham@myhost.com:/var/www/myfiles
+const DESC: &str = r#"Demeter Deploy: Fast blog pushes
+Example: de /home/graham/myfiles graham@myhost.com:/var/www/myfiles
 The format is intentionally the same as `scp`."#;
 
 const CRC32: u64 = 0xFFFFFFFF;
 const HELPER_SEP: char = ':';
-const DEFAULT_HELPER_DST: &str = "/tmp/rcple-h";
+const DEFAULT_HELPER_DST: &str = "/tmp/seed";
 
-// built by build.rs (nasm+ld)
-static HELPER: &'static [u8] = include_bytes!("../asm/rcple-h");
+// Use ./build.sh to make sure this exists and is up to date
+static HELPER: &'static [u8] = include_bytes!("../../seed/target/release/seed-final");
 
 fn main() -> Result<(), anyhow::Error> {
-    let args = clap::Command::new("rcple src_dir user@host:remote_dst_dir")
+    let args = clap::Command::new("de src_dir user@host:remote_dst_dir")
         .about(DESC)
         .arg(arg!(--"dry-run" "Show what we would do without doing it").required(false))
         .arg(arg!(-v --verbose "Debug level output").required(false))
@@ -317,9 +325,3 @@ fn checksum_dir(
     }
     Ok(out)
 }
-
-/* TODO
- - rcpl-h (asm) if file > size crc in a thread (with max thread as num CPUs)
- - rcpl-h (asm) make it as small as possible
- - embed the helper
-*/

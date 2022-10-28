@@ -1,0 +1,11 @@
+[package]
+name = "seed"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+panic = "abort"
+strip = true
+opt-level = "z"
+
+[dependencies]
