@@ -90,7 +90,7 @@ const SYS_CHDIR: u32 = 80;
 const SYS_GETDENTS64: u32 = 217;
 
 // err codes
-// Padding them and using array instead of slice saves about 200 bytes, I don't know why
+// Padding them and using array instead of slice saves about 200 bytes.
 const ERRS: [&[u8; 8]; 36] = [
     b"NOPE   \0", // never happens
     b"EPERM  \0", // Operation not permitted
