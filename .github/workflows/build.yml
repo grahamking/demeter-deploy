@@ -1,0 +1,15 @@
+name: build
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: dtolnay/rust-toolchain@nightly
+    - uses: awalsh128/cache-apt-pkgs-action@latest
+      with: {packages: libssh-dev, version: 1.0 }
+    - uses: actions/checkout@v3
+    - run: ./build.sh
+    - run: cd seed; cargo test --release; cd ..
+    - uses: actions/upload-artifact@v3.1.2
+      with: {name: de, path: de/target/release/de, if-no-files-found: error}
