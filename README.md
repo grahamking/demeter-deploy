@@ -6,9 +6,9 @@ Fast blog deployment, alternative to `rsync` and `scp`. I use this to deploy my 
 
 **Build**: `./build.sh`
 
-**Usage**: `de <src> <remote>`. 
+**Usage**: `de <src> <remote>`.
 
-This is how I deploy, from the root of my Hugo directory: 
+This is how I deploy, from the root of my Hugo directory:
 ```
 de public my_server:/var/www/blog/ --dry-run
 ```
@@ -20,3 +20,8 @@ It uploads a very small helper binary (`seed`, because Demeter) which calculates
 ## Notes
 
 The original `seed` helper was in assembler. I kept it for posterity in `archived_asm/`. The Rust version is in `seed/` and **compiles to the same size**! See [A very small Rust binary indeed](https://darkcoding.net/software/a-very-small-rust-binary-indeed/) for how it's done.
+
+## More, better docs
+
+- [de, the main program](de/)
+- [seed, the remote helper](seed/)
