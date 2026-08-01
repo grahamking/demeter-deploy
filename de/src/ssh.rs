@@ -21,10 +21,10 @@ const O_WRONLY: c_uint = 1;
 const O_CREAT: c_uint = 0o100;
 const O_TRUNC: c_uint = 0o1000;
 
-// Give libssh data in chunks of 64 KiB (cache line).
+// Give libssh data in chunks of this size.
 // I think an sftp packet is 32 KiB.
 // Has to be under 256 KiB or things start to break.
-const SFTP_CHUNK_SIZE: usize = 64 * 1024;
+const SFTP_CHUNK_SIZE: usize = 32 * 1024;
 
 //
 // Public API
